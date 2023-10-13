@@ -40,15 +40,27 @@ This would leave the reading implimentation scoped to the workbook type, solving
 
 The `open_workbook_auto()` would go away completely in the new API. Matching a file to opening it should be left to the library user prioritizing explictness to help enforce correctness.
 
-### Workbook
+
+Here is what the `Reader: Simple` example would look like with the new API:
 
 ```rust
-pub struct Xlsx<'workbook> {
-  sheets: Vec<Sheet<'workbook>>,
-  // ..
-}
+  use calamine::{Workbook, Xslx, XslxError};
+
+  let workbook: Result<Xslx<'_>, XlsxError> = Workbook::open("file.xlsx");
+
+  let worksheet: Option<Worksheet> = workbook?.worksheet("Sheet1");
+
+  if let Some(worksheet): Worksheet = worksheet {
+    // Row<'_>           Rows<'_> 
+    for row in worksheet.rows() {
+      //                                        Cell<'_>
+      println!("row={:?}, column(0)={:?}", row, row.column("A"));
+    }
+  }
+  
   
 ```
+
 
 
 ```rust
@@ -196,7 +208,7 @@ let font: &Font = cell.font();
     sheets: Cell<'cell>,
   }
 ```
--- TODO: GATs
+//  TODO: GATs
 
 ```rust
 trait Workbook {
@@ -241,8 +253,6 @@ trait Workbook {
   }
 ```
 
-
-
 ```rust
   impl ToSheetIndex for &str {
 
@@ -282,12 +292,44 @@ pub struct Sheet<'value> {
   // (column, row)
   start: (u32, u32),
   end: (u32, u32),
-  stride: u32,
+  delta: u32,
   cells: Vec<Cell<'value>>,
   default_cell: Cell<'value>,
   #[cfg(feature = "pictures")]
   pictures: Vec<Vec<u8>>,
 }
+```
+
+```rust
+  pub struct Cells<'cell> {
+    cells: &'cell [Cell<'cell'>],
+  }
+
+  impl<'cell> Cells<'cell> {
+    pub fn count(&self) -> usize {
+      self.cells.len()
+    }
+
+    pub fn used(&self) -> usize {
+      self.cells.iter().reduce(|cell, used| u32::from(!cell.is_empty()) + used)
+    }
+    pub fn empty(&self) -> usize {
+      self.cells.iter().reduce(|cell, empty| u32::from(cell.is_empty()) + empty)
+    }
+  }
+
+
+  impl<'cell> Iterator for Cells<'cell> {
+    type Item = Cell<'cell>;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+      self.cells.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+      (0, Some(self.cells.len()))
+    }
+  }
 ```
 
 ```rust
@@ -304,19 +346,36 @@ impl<'cell> Sheet<'cell> {
     self.cells.get(pos.into())
   }
 
+  pub fn cells(&self) -> Cells<'cell> {
+    Cells {
+      
+    }
+  }
+
+  /// # Returns
+  ///
+  /// Returns and iterator over the sheets rows.
+  pub fn rows(&self) -> Rows<'cell> {
+    Rows {
+      cells: &self.cells,
+      delta: self.delta,
+      row: u32,
+    }
+  }
+
+  
   /// # Returns
   ///
   /// Returns `Some(&Sheet<'_>)` if the given range is within the bounds of the current sheets dimensions, or `None` of it goes outside.
-  pub fn cell_range<R: ToCellRangeIndex>(&self, range: R) -> Option<&Sheet<'cell>> {
+  pub fn window<R: ToCellRangeIndex>(&self, range: R) -> Option<&Window<'cell>> {
 
     // TODO: Impliment ToCellRangeIndex for ((u32, u32), (u32, u32)), [[u32, u32],[u32, u32]], [u32, u32, u32, u32], (u32, u32, u32, u32) and &str
 
     let ((start_col, start_row), (end_col, end_row)) = range.into();
 
-    // TODO: Calc a new stride.
+    // TODO: Calc a new delta.
 
-    
-    self.cells.get(self.stride )
+    self.cells.get(self.delta )
   }
 }
   
@@ -406,26 +465,109 @@ impl CellIndex for &str {
 }
 ```
 
+```rust
+fn number_to_excel_column(n: u32) -> String {
+    let mut result = String::new();
+    let mut n = n;
 
+    while n > 0 {
+        let remainder = (n - 1) % 26;
+        result.push((b'A' + remainder as u8) as char);
+        n = (n - 1) / 26;
+    }
+
+    result.chars().rev().collect()
+}```
+
+```rust
+  pub struct Window<'cell> {
+    
+    cells: &'cell [Cell<'cell>],
+    start: (u32, u32),
+    end: (u32, u32),
+    delta: u32,
+  }
+```
+
+```rust
+  impl<'cell> Window<'cell> {
+    // TODO: add Sheet functions to Window
+  }
+```
 
 
 Storing the cells as a vec would permit great cache locality on both reads and writes.
 
-Storing 2-dimensional data in a 1-dimensional vec requires a stride to then offset the index. In this case we will stride the lengh of each row.
+Storing 2-dimensional data in a 1-dimensional vec requires a delta to then offset the index. In this case we will delta the lengh of each row.
 Put another way we take the column amount, end.0, and index into a multiple of it to access the row we want.
 To get the column of the row we want, we just use a standard additive offset.
 
 Example:
 ```rust
-pub struct Row<'row> {
-  cells: &'row [Cell<'row>],
-  stride: u32,
-  curr: u32,
+pub struct Rows<'cell> {
+  cells: &'row [Cell<'cell>],
+  columns: u32,
+  rows: u32,
+  row: u32,
 }
+```
 
+```rust
+  impl<'cell> Iterator for Rows<'cell> {
+    type Item = Row<'cell>
+    
+    fn next(&mut self) -> Option<Self::Item> {
+
+      let start = self.row * self.columns;
+      let end = start + self.columns;
+          
+      let row = Row { 
+        row: self.cells.get(start..end)?,
+        len: *self.columns,
+        number: *self.row,
+        };
+
+        self.row += 1;
+
+        Some(row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+      (0, Some(self.rows)
+    }
+  }
+
+  impl<'cell> ExactSizeIterator for Rows<'cell> {
+    fn len(&self) -> usize {
+      (self.rows - self.row) as usize
+    }
+  }
+```
+
+```rust
+pub struct Row<'cell> {
+  row: &'cell [Cell<'cell>],
+  len: u32,
+  number: u32,
+}
+```
+
+```rust
+impl<'cell> Row<'cell> {
+  pub fn column<C: ToColumnIndex>(&self, column: C) -> &Cell {
+    
+  }
+
+  pub fn len(&self) -> usize {
+    *self.len
+  }
+}  
+```
+
+```rust
 pub fn next(&mut self) -> Option<&[Cell<'_>]> {
-    let row_start = self.curr * self.stride;
-    let row_end = row_start + self.stride;
+    let row_start = self.curr * self.delta;
+    let row_end = row_start + self.delta;
   
     self.curr += 1;
     
