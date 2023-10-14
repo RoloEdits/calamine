@@ -1,3 +1,4 @@
+
 # Changes for v1.0.0
 
 ## Summary
@@ -5,154 +6,205 @@
 ## TODO
 
 - [ ] Decide if library will stay read-only
-
 ## API
 
 The main focus of the proposed changes is to:
 - Be more hierarchical in data access. Having a clear ownership of Workbook -> Sheet -> Cell access pattern. The data should belong to the logical scope. Even if potentially out of spec.
-  - Example: A Workbook has a theme, but the colors of a cell can be changed outside of that. The color value should then come through the Cell.
+  
+  - Example: A Workbook has a theme, but the colors of a cell can be changed outside of that. The color value should then come through the Cell, using the theme as the default if there is no other color detected.
+  
   - Example: Pictures are related to a sheet. Even if the spec has a `media` path directly under the Workbook, the pictures should be accessed through the Sheet.
-- Focus on an ergonomic API, with lower exposure of internals. Contrasting the current API to others from other languages it can be seen that there is some rough edges. There are some areas that can be polished up during the refactor. Just doing the above point would help here.
-  - Example: When looking into implimenting https://github.com/tafia/calamine/issues/362, it would require a pretty direct breaking change as the `String` type is directly exposed when getting the value out. Instead, exposing a `&str` would allow the backing memory to be an implimentation detail.
-  - Example: The current `fn worksheets(&mut self) -> Vec<(String, Range<DataType>)>;` returns paht information and the size of the sheet. These should just be in a Sheet type with fields for `name` and `dimensions`, accessed through the thing that should logicaly own it; `sheet.name()` and `sheet.dimensions()`.
-- And using the opportunity in the resructure to squeeze more performance.
-  - Example: In `xlsx` files, as an example, there is a shared string component that is linked to by an index in the corrosponding sheet/s. In a worse case scenario the sheet have nothing but strings and each string is unique, with no sharing occuring. This means that teh shared string file would be at least as long as any given sheet. The parsing of these can files can be done in parallel. The backing string `Vec<T>` can be of an SSO string type, like [`compact_str`](https://github.com/ParkMyCar/compact_str), and only need to share a refernce of `&str`, to the `DataType` enum. The string Vec acting as an arena. The `Cell<'value>` then only need to store a `&str` with the index into the string arena maping very well to the indexing of the `xlsx` spec. Changing to Vec where possible should also improve general performance as look-ups are `O(1)` and they are more cache friendly.
-  - Example: Parallel iteration using [`rayon`](https://github.com/rayon-rs/rayon). This could be an easy performance boost as the backing `Vec`s can be very friendly to this kind of work. The most obvious use case is when iterating over rows. If the hierarchal change above is stuck to, then all context of where a cell is, is stored within the `Cell` itself, and thus even with out of order iteration, you still have the context of the row the cell is in.
+
+- Focus on an ergonomic API, with lower exposure of internals. Contrasting the current API to other libraries from other languages, it can be seen that there is some rough edges. There are some areas that can be polished up during the refactor. Just doing the above point on hierarchal ownership would help a lot here.
+  
+  - Example: When looking into implementing https://github.com/tafia/calamine/issues/362, it would require a pretty direct breaking change as the `String` type is directly exposed when getting the value out. Instead, exposing a `&str` would allow the backing memory to be an implementation detail.
+ 
+  - Example: The current `fn worksheets(&mut self) -> Vec<(String, Range<DataType>)>;` returns path information and the cells. These should just be in a Sheet type with fields for `name` and `cells`, accessed through the thing that should logically own it; `sheet.name()` and `sheet.cells()`. Even further, cells could be its own type, further encapsulation the internals.
+  
+- And using the opportunity in the restructure, there are areas to squeeze more performance.
+  
+  - Example: In `xlsx` files, as an example, there is a shared string component that is linked to by an index in the corresponding sheet/s. In a worse case scenario the sheet have nothing but strings and each string is unique, with no sharing occurring. This means that the shared string file would be at least as long as any given sheet. The parsing of these can files can be done in parallel. The backing string `Vec<T>` can be of an SSO string type, like [`compact_str`](https://github.com/ParkMyCar/compact_str), and only needs to share a reference of `&str`, to the `DataType` enum. The string `Vec` acting as an arena. The `Cell<'value>` then only need to store a `&str` with the index into the string arena, mapping very well to the indexing of the `xlsx` spec. Changing to `Vec` where possible should also improve general performance as look-ups are `O(1)` and they are more cache friendly.
+  
+  - Example: Implementing parallel iteration through [`rayon`](https://github.com/rayon-rs/rayon). This could be an easy performance boost as the backing `Vec`s can be very friendly to this kind of work. The most obvious use case is when iterating over rows.
   
 ### Imports
 
-The first part of the proposed changes is to simplify the direct imports.
+The first part of the proposed changes is to simplify the direct imports. A `Workbook` trait and the relevant implementing struct and its errors:
 
 ```rust
-use calamine::{Workbook, Xlsx};
+use calamine::{Workbook, Xlsx, XlsxError};
 ```
 
+Using the traits fully qualified syntax to open the workbook:
 
 ```rust
-let workbook: Result<Xlsx<'_>> = Workbook::open("tests/simple.xlsx");
+let workbook: Result<Xlsx<'_>, XlsxError> = Workbook::open("tests/simple.xlsx");
 ```
 
-This would leave the reading implimentation scoped to the workbook type, solving this issue of the present API:
+This would leave the reading implementation scoped to the workbook type, solving this issue of the present API:
 ```rust  
-// FIXME `Reader` must only be seek `Seek` for `Xls::xls`. Because of the present API this limits
-// the kinds of readers (other) data in formats can be read from.
+// FIXME `Reader` must only be seek `Seek` for `Xls::xls`. Because of the present API, this limits the kinds of readers (other) data in formats can be read from.
 ```
 
-The `open_workbook_auto()` would go away completely in the new API. Matching a file to opening it should be left to the library user prioritizing explictness to help enforce correctness.
+The current `open_workbook_auto()` would go away completely in the new API, opting for user explicitness to help enforce correctness.
 
-
-Here is what the `Reader: Simple` example would look like with the new API:
-
-```rust
-  use calamine::{Workbook, Xslx, XslxError};
-
-  let workbook: Result<Xslx<'_>, XlsxError> = Workbook::open("file.xlsx");
-
-  let worksheet: Option<Worksheet> = workbook?.worksheet("Sheet1");
-
-  if let Some(worksheet): Worksheet = worksheet {
-    // Row<'_>           Rows<'_> 
-    for row in worksheet.rows() {
-      //                                        Cell<'_>
-      println!("row={:?}, column(0)={:?}", row, row.column("A"));
-    }
-  }
-  
-  
-```
-
-
+### Workbook
 
 ```rust
-// Gets a specified sheet from the workbook
-let sheet: Option<Sheet<'_>> = workbook.worksheet("Sheet1");
-let sheet: Option<Sheet<'_>> = workbook.worksheet(0);   
+// Gets all the sheets in the workbook. If there are no sheets then return `None`.
+let sheets: Option<Sheets<'_>> = workbook.worksheets();
 
-// Gets all sheets in the workbook
-let sheets: &[Sheet<'_>] = workbook.worksheets();
+// Using traits we can move to support both strings and numbers to get the
+// desired sheet.
+//
+// If the sheet does not exist in the workbook then return `None`
+let sheet: Option<Sheet<'_>> = workbook.sheet("Sheet1");
+let sheet: Option<Sheet<'_>> = workbook.sheet(0);
+
+// Could also maybe impliment some metadata things
+let author: &str = workbook.author();
+let title: &str = workbook.title();
 ```
 ### Sheet
 
 ```rust
-let name: &str = sheet.name();
-let path: &str = sheet.path();
-let (column, row): (u32, u32) = sheet.start();
-let (column, row): (u32, u32) = sheet.end();
-let (columns, rows): (u32, 32) = sheet.dimensions();  
-```
+let sheets: Sheets<'_> = workbook.worksheets().unwrap();
 
-```rust
-// returns an iterator, `Rows<'_>`, over the rows, `Row<'_>`, which wraps a `&[Cell<'_>]`.
-for row in sheet.rows() {}
-```
+// It contains methods to get info, like the amount of sheets.
+let count: size = sheets.count();
 
-```rust
-// returns an iterator `Column<'_>` that yeilds a `&Cell`
-  for cell in sheet.column("A") {}
-```
-or
-```rust
-  for cell in sheet.column(0) {}
-```
+// `Sheets<'_>` is also an iterator over all the sheets, yielding a `Sheet<'_>`.
+for sheet in sheets {
+	// Gets the name of the sheet
+	let name: &str = sheet.name();
 
-It could be possible to support both types of indexes with some kind of `IntoColumnIndex` trait.
+	// Can also look into returning a `&Path` instead
+	let path: &str = sheet.path();
 
-```rust
-  static ALPHABET_INDEX: HashMap<&str, u32> = hashmap!["A": 0, "B": 2];
+	// Returns the columns and rows count to make up the size of the sheet
+	// This only counting the used cells, not from A1.
+	let dimensions: (u32, u32) = sheet.dimensions();
 
-  trait IntoColumnIndex {
-     fn into(&self) -> u32 {
-        // u32:
-        *self
-        // &str: Some kind match over a static map, or dynamicly calc it
-        ALPHABET_INDEX[self]
-    }
-  }
-```
+	// Returns the top left most column-row pair
+	let start: (u32, u32) = sheet.start();
+	// Returns the bottom right most column-row pair
+	let end: (u32, u32) = sheet.end();
 
-Getting a cell from a co-ordinate:
-```rust
-let cell: Cell = sheet.cell(0, 0);
-```
+	// Gets the specified cell from the sheet
+	//
+	// Using traits we can support both number syntax and excel syntax
+	let cell: Option<Cell<'_>> = sheet.cell((0,0));
+	let cell: Option<Cell<'_>> = sheet.cell([0, 0]);
+	let cell: Option<Cell<'_>> = sheet.cell("A1");
 
-```rust
-  // &[Cell]
-  for cell in sheet.cells() {}
-```
+	// Returns an iterator over all the cells in the sheet
+	let cells: Option<Cells<'_>> = sheet.cells();
 
-A subsection of a square range
-```rust
-// could also call `window`
-// Sheet<'_> or CellWindow<'_>
-  for cell in sheet.cell_range("A1:B100") {}
-  // &[Cell]
-  for cell in sheet.window((0, 0), (2, 100)) {}
-```
+	for cell in cells {}
 
-```rust
-  pub struct Sheet<'sheet> {
-    cells: &'sheet [Cell<'sheet>],
-    start: (u32, u32),
-    end: (u32, u32),
-  }
+	// but also has metadata like the count
+	let count: usize = cells.count();
+	// how many cells are used
+	let used: usize = cells.used();
+	// and empty
+	let empty: usize = cells.empty();
+
+	// `.rows()` returns an iterator, `Rows<'_>`, which yields a `Row<'_>`. 
+	for row in sheet.rows() {
+		// effectively a `.len()`
+		let columns: usize = row.columns();
+
+		// Gets the cell from the specified column of the row
+		let cell: Option<Cell<'_>> = row.column("A");
+		let cell: Option<Cell<'_>> = row.column(0);
+	}
+
+	// Can also get a subview into the sheet
+	// Returns `None` if the range is out of bounds from the parent sheet
+	let window: Option<Window<'_>> = sheet.window([[9, 9], [14, 19]]);
+	let window: Option<Window<'_>> = sheet.window((9, 9),(14, 19));
+	let window: Option<Window<'_>> = sheet.window("J10:O20");
+
+	// It shares much the same with `Sheet<'_>`
+	// the main difference is that the indexing is relative to the new window.
+	//
+	// This gets the top left most cell of the window.
+	let cell: Option<Cell<'_>> = window.cell(0, 0);
+	
+	let count: usize = window.count();
+	let used: usize = window.used();
+	let empty: usize = window.empty();
+
+	// even creating another window
+	let another_window: Option<Window<'_>> = window.window("A1:C4");
+
+	// Even get the rows over the window
+	let another_row in another_window.rows() {}
+}
+
+// There is also a `.columns()` function which returns an iterator `Columns<'_>` that returns a 
+// `Column<'_>`
+for column in sheet.columns {
+	// Get the some given rows data
+	let cell: Option<Cell<'_>> = column.row("A");
+	let cell: Option<Cell<'_>> = column.row(5);
+}
 ```
 
 ### Cell 
 
 ```rust
+
+let cell: Cell<'_> = sheet.cell("A1");
+
+// Get the column and row of the cell
+let column: u32 = cell.column();
+let row: u32 = cell.column();
+
+// Returns the formula if there was one in the cell 
+let formula: Option<&str> = cell.formula();
+
+// Gets the solid fill color, defaulting to the theme color if no manual color was set
+let color: Color = cell.fill();
+// Gets the hex representation
+// 'FFFFFF'
+let rgb: &str = color.rgb();
+let rgbs: &str = color.rgba();
+let argb: &str = color.argb();
+
+let red: u8 = color.red();
+let green: u8 = color.green();
+let blue: u8 = color.blue();
+let alpha: u8 = color.alpha();
+
+let (red, green, blue, alpha) = color.raw();
+
+// Gets info about the font style
+let font: &Font = cell.font();
+
+let color: Color = font.color();
+// example: 'Arial'
+let name: &str = font.name();
+// example: 11
+let size: usize = font.size();
+
+// bool checks
+font.is_bold();
+font.is_italic();
+font.is_underscore();
+font.is_strikethrough();
+
 match cell.value() {
     None => println!("empty cell"),
     Some(value) => match value {
-    // i64
     Value::Int(int) => println!("Int: {}", int),
-    // f64
     Value::Float(float) => println!("Float: {}", float),
-    // &str
     Value::String(str) => println!("String: {}", str),
     //...
     }
 }
 ```
+
 
 ```rust
 let fill: Color = cell.fill();
@@ -165,40 +217,32 @@ let formula: Option<&str> = cell.formula();
 let font: &Font = cell.font();
 ```
 
-### Font
-
+Here is what a slightly modified `Reader: Simple` example would look like with the new API:
 ```rust
- pub struct Font {
-  name: String,
-  size: u32,
-  color: Color,
-  is_bold: bool,
-  is_italic: bool,
-  is_underscore: bool,
-  is_strikethrough: bool,
+use calamine::{Workbook, Xslx, XslxError};
+
+fn main() -> Result<(), XlsxError> {
+	// +-----------+--------------+---------------+------+
+	// |     A     |      B       |       C       |  D   |
+	// +-----------+--------------+---------------+------+
+	// | Star Wars | George Lucas | 5,749,978,736 | 1977 |
+	// +-----------+--------------+---------------+------+
+	let workbook: Xslx<'_>> = Workbook::open("file.xlsx")?;
+	
+	if let Some(worksheet): Worksheet<'_> = workbook.worksheet("Sheet1") {
+	    for row in worksheet.rows() {
+		    let franchise: Cell<'_> = row.column("A").unwrap();
+		    let valuation: Cell<'_> = row.column(2).unwrap();
+			
+			println!("column(\"A\")={:?}, column(2)={:?}", franchise.value(), valuation.value());
+			// Output:
+			//	column("A")=Some(Value::String("Star Wars")), column(2)=Some(Value::Int(5749987736)) 
+		}
+	}
+	
+	Ok(())
 }
 ```
-
-```rust
-  let name: &str = font.name();
-  font.size();
-  let color: Color = font.color();
-  font.is_bold();
-```
-
-### Color
-
-```rust
-  // ARGB representation
-  pub struct Color(u8, u8, u8, u8)
-```
-
-```rust
-  // "FF00FF00"
-  let rgb: &str = color.rgb();
-  let argb: &str = color.argb();
-```
-
 ## Internals
 
 ### Workbook
@@ -208,7 +252,6 @@ let font: &Font = cell.font();
     sheets: Cell<'cell>,
   }
 ```
-//  TODO: GATs
 
 ```rust
 trait Workbook {
@@ -369,7 +412,7 @@ impl<'cell> Sheet<'cell> {
   /// Returns `Some(&Sheet<'_>)` if the given range is within the bounds of the current sheets dimensions, or `None` of it goes outside.
   pub fn window<R: ToCellRangeIndex>(&self, range: R) -> Option<&Window<'cell>> {
 
-    // TODO: Impliment ToCellRangeIndex for ((u32, u32), (u32, u32)), [[u32, u32],[u32, u32]], [u32, u32, u32, u32], (u32, u32, u32, u32) and &str
+    // TODO: Implement ToCellRangeIndex for ((u32, u32), (u32, u32)), [[u32, u32],[u32, u32]], [u32, u32, u32, u32], (u32, u32, u32, u32) and &str
 
     let ((start_col, start_row), (end_col, end_row)) = range.into();
 
@@ -495,10 +538,22 @@ fn number_to_excel_column(n: u32) -> String {
   }
 ```
 
+It could be possible to support both types of indexes with some kind of `IntoColumnIndex` trait.
+
+```rust
+  trait IntoColumnIndex {
+     fn into(&self) -> u32 {
+        // u32:
+        *self
+        // &str: Some kind match over a static map, or dynamically calc it
+        ALPHABET_INDEX[self]
+    }
+  }
+```
 
 Storing the cells as a vec would permit great cache locality on both reads and writes.
 
-Storing 2-dimensional data in a 1-dimensional vec requires a delta to then offset the index. In this case we will delta the lengh of each row.
+Storing 2-dimensional data in a 1-dimensional vec requires a delta to then offset the index. In this case we will delta the length of each row.
 Put another way we take the column amount, end.0, and index into a multiple of it to access the row we want.
 To get the column of the row we want, we just use a standard additive offset.
 
@@ -594,6 +649,9 @@ pub fn next(&mut self) -> Option<&[Cell<'_>]> {
 ### Value
 
 ```rust
+// Leaves open the ability to specialize with future updates
+// like a Python() for example, extracting the python code from the formula.
+#[non_exhaustive]
 pub enum Value<'value> {
   /// Signed integer
   Int(i64),
@@ -619,9 +677,9 @@ pub enum Value<'value> {
 ```
 Passing around the lifetime for strings means that we can choose what ever backing memory we want, for example `compact_str::CompactString` or `smartstring::String`.
 
-We get the benifit of SSO while also keeping the exposed API to a standard `&str`. 
+We get the benefit of SSO while also keeping the exposed API to a standard `&str`. 
 
-If we directly stored those types in the Value enum then we would be at the mercy of relying on that types changes as well as compatablity issues when users use the value.
+If we directly stored those types in the Value enum then we would be at the mercy of relying on that types changes as well as compatibility issues when users use the value.
   
 ```rust
 pub enum CellErrorType {
@@ -642,4 +700,44 @@ pub enum CellErrorType {
   /// Getting data
   GettingData,
 }
+```
+
+### Font
+
+```rust
+ pub struct Font {
+  name: String,
+  size: u32,
+  color: Color,
+  is_bold: bool,
+  is_italic: bool,
+  is_underscore: bool,
+  is_strikethrough: bool,
+}
+```
+
+```rust
+  let name: &str = font.name();
+  font.size();
+  let color: Color = font.color();
+  font.is_bold();
+```
+
+### Color
+
+```rust
+  // ARGB representation
+  pub struct Color {
+  red: u8,
+  green: u8,
+  blue: u8,
+  alpha: u8,
+  }
+```
+
+```rust
+  // "FF00FF00"
+  let rgb: &str = color.rgb();
+  let rgba: &str = color.rgba();
+  let argb: &str = color.argb();
 ```
