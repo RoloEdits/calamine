@@ -5,7 +5,21 @@
 
 ## TODO
 
-- [ ] Decide if library will stay read-only
+- [ ] Get rid of `Seek` requirement https://github.com/tafia/calamine/issues/164
+- [ ] maintain/improve support for wasm
+- [ ] async api https://github.com/tafia/calamine/issues/286
+- [ ] lazy iterator over rows/columns https://github.com/tafia/calamine/issues/27
+- [ ] Associating data and formula https://github.com/tafia/calamine/issues/247
+- [ ] Ignore hidden rows https://github.com/tafia/calamine/issues/237
+- [ ] Support for Google Sheets https://github.com/tafia/calamine/issues/162
+- [ ] Getting the name of the author https://github.com/tafia/calamine/issues/149
+- [ ] Support SPSS files https://github.com/tafia/calamine/issues/112
+- [ ] XLSX with passwords https://github.com/tafia/calamine/issues/102 https://github.com/nushell/nushell/issues/10546
+- [ ] Get sub-view of sheet https://github.com/tafia/calamine/issues/147
+- [ ] Multi-threaded reading https://github.com/tafia/calamine/issues/346
+- [ ] Get cell style/color info https://github.com/tafia/calamine/issues/191
+- [ ] VBA from open docs
+- [ ] Writing files out
 ## API
 
 The main focus of the proposed changes is to:
@@ -26,8 +40,9 @@ The main focus of the proposed changes is to:
   - Example: In `xlsx` files, as an example, there is a shared string component that is linked to by an index in the corresponding sheet/s. In a worse case scenario the sheet have nothing but strings and each string is unique, with no sharing occurring. This means that the shared string file would be at least as long as any given sheet. The parsing of these can files can be done in parallel. The backing string `Vec<T>` can be of an SSO string type, like [`compact_str`](https://github.com/ParkMyCar/compact_str), and only needs to share a reference of `&str`, to the `DataType` enum. The string `Vec` acting as an arena. The `Cell<'value>` then only need to store a `&str` with the index into the string arena, mapping very well to the indexing of the `xlsx` spec. Changing to `Vec` where possible should also improve general performance as look-ups are `O(1)` and they are more cache friendly.
   
   - Example: Implementing parallel iteration through [`rayon`](https://github.com/rayon-rs/rayon). This could be an easy performance boost as the backing `Vec`s can be very friendly to this kind of work. The most obvious use case is when iterating over rows.
-  
-### Imports
+
+### Read
+#### Imports
 
 The first part of the proposed changes is to simplify the direct imports. A `Workbook` trait and the relevant implementing struct and its errors:
 
@@ -38,7 +53,7 @@ use calamine::{Workbook, Xlsx, XlsxError};
 Using the traits fully qualified syntax to open the workbook:
 
 ```rust
-let workbook: Result<Xlsx<'_>, XlsxError> = Workbook::open("tests/simple.xlsx");
+let workbook: Result<Xlsx<'_, '_>, XlsxError> = Workbook::open("file.xlsx");
 ```
 
 This would leave the reading implementation scoped to the workbook type, solving this issue of the present API:
@@ -48,85 +63,79 @@ This would leave the reading implementation scoped to the workbook type, solving
 
 The current `open_workbook_auto()` would go away completely in the new API, opting for user explicitness to help enforce correctness.
 
-### Workbook
+#### Workbook
 
 ```rust
 // Gets all the sheets in the workbook. If there are no sheets then return `None`.
-let sheets: Option<Sheets<'_>> = workbook.worksheets();
+let sheets: Option<Worksheets<'_>> = workbook.worksheets();
+
+let author: &str = workbook.author();
 
 // Using traits we can move to support both strings and numbers to get the
 // desired sheet.
 //
 // If the sheet does not exist in the workbook then return `None`
-let sheet: Option<Sheet<'_>> = workbook.sheet("Sheet1");
-let sheet: Option<Sheet<'_>> = workbook.sheet(0);
-
-// Could also maybe impliment some metadata things
-let author: &str = workbook.author();
-let title: &str = workbook.title();
+let sheet: Option<&Workheet<'_>> = workbook.worksheet("Sheet1");
+let sheet: Option<&Workheet<'_>> = workbook.worksheet(0);
 ```
-### Sheet
+#### Sheet
 
 ```rust
-let sheets: Sheets<'_> = workbook.worksheets().unwrap();
-
 // It contains methods to get info, like the amount of sheets.
 let count: size = sheets.count();
 
 // `Sheets<'_>` is also an iterator over all the sheets, yielding a `Sheet<'_>`.
-for sheet in sheets {
+for sheet in workbook.worksheets() {
 	// Gets the name of the sheet
 	let name: &str = sheet.name();
-
+	
 	// Can also look into returning a `&Path` instead
 	let path: &str = sheet.path();
-
+	
 	// Returns the columns and rows count to make up the size of the sheet
 	// This only counting the used cells, not from A1.
 	let dimensions: (u32, u32) = sheet.dimensions();
-
+	
 	// Returns the top left most column-row pair
 	let start: (u32, u32) = sheet.start();
 	// Returns the bottom right most column-row pair
 	let end: (u32, u32) = sheet.end();
-
+	
 	// Gets the specified cell from the sheet
 	//
 	// Using traits we can support both number syntax and excel syntax
 	let cell: Option<Cell<'_>> = sheet.cell((0,0));
 	let cell: Option<Cell<'_>> = sheet.cell([0, 0]);
 	let cell: Option<Cell<'_>> = sheet.cell("A1");
-
-	// Returns an iterator over all the cells in the sheet
-	let cells: Option<Cells<'_>> = sheet.cells();
-
-	for cell in cells {}
-
+	
+	// Returns an 'iterator' over all the cells in the sheet
+	while let Some(cell) in sheet.cells() {}
+	
 	// but also has metadata like the count
 	let count: usize = cells.count();
 	// how many cells are used
 	let used: usize = cells.used();
 	// and empty
 	let empty: usize = cells.empty();
-
+	
 	// `.rows()` returns an iterator, `Rows<'_>`, which yields a `Row<'_>`. 
 	for row in sheet.rows() {
 		// effectively a `.len()`
 		let columns: usize = row.columns();
-
+		
 		// Gets the cell from the specified column of the row
 		let cell: Option<Cell<'_>> = row.column("A");
 		let cell: Option<Cell<'_>> = row.column(0);
 	}
-
-	// Can also get a subview into the sheet
+	
+	// Get a subview into the sheet
 	// Returns `None` if the range is out of bounds from the parent sheet
-	let window: Option<Window<'_>> = sheet.window([[9, 9], [14, 19]]);
+	let window: Option<Window<'_>> = sheet.window([9, 9], [14, 19]);
 	let window: Option<Window<'_>> = sheet.window((9, 9),(14, 19));
-	let window: Option<Window<'_>> = sheet.window("J10:O20");
-
-	// It shares much the same with `Sheet<'_>`
-	// the main difference is that the indexing is relative to the new window.
+	let window: Option<Window<'_>> = sheet.window("J10", "O20");
+	
+	// Would shares much the same with `Sheet<'_>`
+	// with the main difference being that the indexing is relative to the new window.
 	//
 	// This gets the top left most cell of the window.
 	let cell: Option<Cell<'_>> = window.cell(0, 0);
@@ -134,24 +143,24 @@ for sheet in sheets {
 	let count: usize = window.count();
 	let used: usize = window.used();
 	let empty: usize = window.empty();
-
-	// even creating another window
-	let another_window: Option<Window<'_>> = window.window("A1:C4");
-
-	// Even get the rows over the window
-	let another_row in another_window.rows() {}
+	
+	// Creating another window from a window
+	let another_window: Option<Window<'_>> = window.window("A1", "C4");
+	
+	// Get the rows over the window
+	for another_row in another_window.rows() {}
 }
 
-// There is also a `.columns()` function which returns an iterator `Columns<'_>` that returns a 
+// A `.columns()` function which returns an iterator `Columns<'_>` that returns a 
 // `Column<'_>`
-for column in sheet.columns {
+for column in sheet.columns() {
 	// Get the some given rows data
 	let cell: Option<Cell<'_>> = column.row("A");
 	let cell: Option<Cell<'_>> = column.row(5);
 }
 ```
 
-### Cell 
+#### Cell 
 
 ```rust
 
@@ -160,12 +169,14 @@ let cell: Cell<'_> = sheet.cell("A1");
 // Get the column and row of the cell
 let column: u32 = cell.column();
 let row: u32 = cell.column();
+// Or maybe just a position
+let (column, row) = cell.position();
 
 // Returns the formula if there was one in the cell 
 let formula: Option<&str> = cell.formula();
 
 // Gets the solid fill color, defaulting to the theme color if no manual color was set
-let color: Color = cell.fill();
+let color: &Color = cell.fill();
 // Gets the hex representation
 // 'FFFFFF'
 let rgb: &str = color.rgb();
@@ -179,10 +190,10 @@ let alpha: u8 = color.alpha();
 
 let (red, green, blue, alpha) = color.raw();
 
-// Gets info about the font style
+// Gets info about the font styling
 let font: &Font = cell.font();
 
-let color: Color = font.color();
+let color: &Color = font.color();
 // example: 'Arial'
 let name: &str = font.name();
 // example: 11
@@ -194,27 +205,17 @@ font.is_italic();
 font.is_underscore();
 font.is_strikethrough();
 
-match cell.value() {
-    None => println!("empty cell"),
+let value: Option<Value<'_>> = cell.value();
+
+match value {
+    None => println!("no value in cell"),
     Some(value) => match value {
     Value::Int(int) => println!("Int: {}", int),
     Value::Float(float) => println!("Float: {}", float),
-    Value::String(str) => println!("String: {}", str),
+    Value::String(string) => println!("String: {}", string),
     //...
     }
 }
-```
-
-
-```rust
-let fill: Color = cell.fill();
-let (column, row): (u32, u32) = cell.position(); 
-let row: u32 = cell.row();
-let column: u32 = cell.column();
-
-let formula: Option<&str> = cell.formula();
-
-let font: &Font = cell.font();
 ```
 
 Here is what a slightly modified `Reader: Simple` example would look like with the new API:
@@ -222,69 +223,141 @@ Here is what a slightly modified `Reader: Simple` example would look like with t
 use calamine::{Workbook, Xslx, XslxError};
 
 fn main() -> Result<(), XlsxError> {
-	// +-----------+--------------+---------------+------+
-	// |     A     |      B       |       C       |  D   |
-	// +-----------+--------------+---------------+------+
-	// | Star Wars | George Lucas | 5,749,978,736 | 1977 |
-	// +-----------+--------------+---------------+------+
-	let workbook: Xslx<'_>> = Workbook::open("file.xlsx")?;
+	// +-----------+--------------+---------------+---------+
+	// |     A     |      B       |       C       |    D    |
+	// +-----------+--------------+---------------+---------+
+	// | franchise |   creator    |     value     | created |
+	// +-----------+--------------+---------------+---------+
+	// | Star Wars | George Lucas |   5749978736  |   1977  |
+	// +-----------+--------------+---------------+---------+
+	let workbook: Xslx<'_, '_>> = Workbook::open("file.xlsx")?;
 	
-	if let Some(worksheet): Worksheet<'_> = workbook.worksheet("Sheet1") {
-	    for row in worksheet.rows() {
-		    let franchise: Cell<'_> = row.column("A").unwrap();
-		    let valuation: Cell<'_> = row.column(2).unwrap();
-			
-			println!("column(\"A\")={:?}, column(2)={:?}", franchise.value(), valuation.value());
-			// Output:
-			//	column("A")=Some(Value::String("Star Wars")), column(2)=Some(Value::Int(5749987736)) 
+	if let Some(worksheet): Option<&Worksheet<'_>> = workbook.worksheet("Sheet1") {
+	    let rows = worksheet.rows();
+		
+		let header: Option<Row<'_>> = rows.next();
+		
+	    let Some(Value::String(franchise)) = header.column(0) else {
+		    panic!("not a header row");
+	    };
+		
+	    let Some(Value::String(value)) = header.column("C") else {
+		    panic!("not a header row");
+	    };
+		
+		println!("{franchise}, {value}");
+		
+	    for row in rows {
+		    let franchise: Cell<'_> = .unwrap();
+		    let valuation: Cell<'_> = .unwrap();
+		    
+		let Some(Value::String(franchise)) = row.column("A") else {
+		    panic!("not a string");
+	    };
+		
+	    let Some(Value::Int(value)) = row.column(2) else {
+		    panic!("not an int");
+	    };
+		
+		println!("column(\"A\")={:?}, column(2)={:?}", franchise.value(), valuation.value());
+		// Output:
+		//      franchise, value
+		//      column("A")="Star Wars", column(2)=5749987736 
 		}
 	}
 	
 	Ok(())
 }
 ```
+
+## Write
+#### Imports
+
+```rust
+use clamimne::{Workbook, Xlsx, XlsxError};
+```
+
+```rust
+// Open existing workbook
+let mut workbook: Result<Workbook<'_>> = Workbook::open("file.xslx");
+// From scratch
+let mut workbook_builder: Result<WorkbookBuilder> = Workbook::new();
+
+let mut workbook: Workbook<'_, '_> = workbook_builder
+									.author("I Wrote This")
+									.theme()
+									.build();
+
+// Worksheets inheret the workbook theme if one is not set, so we can only
+// have them be made through the workbook.
+let new_sheet: Result<&mut WorksheetBuilder> = workbook.new_worksheet("Sheet1");
+
+new_sheet.size("A1", "E100").;
+
+// Get mutable worksheet
+let mut worksheet: Option<&mut Worksheet> = workbook.worksheet_mut("Sheet1");
+
+// Make a new worksheet using excel-range syntax
+//
+// Can fail if dimensions entered are invalid.
+let mut worksheet: Result<Worksheet<'_>> = Worksheet::new("A1", "E100");
+// Using number syntax
+let mut worksheet: Result<Worksheet<'_>> = Worksheet::new((0, 0), (5, 99));
+// or
+let mut worksheet: Result<Worksheet<'_>> = Worksheet::new([0, 0], [5, 99]);
+```
 ## Internals
 
 ### Workbook
 
 ```rust
-  struct Xlsx<'cell> {
-    sheets: Cell<'cell>,
+  struct Xlsx<'path,'cell> {
+	path: &'path Path,
+	author: CompactString,
+	worksheets: Vec<Worksheet<'cell>>,
   }
 ```
 
 ```rust
 trait Workbook {
-  type Workbook<'cell> where Self: 'cell;
-  type Error;
-
-  fn open() -> Result<Self::Workbook<'cell>, Self::Error>;
-
-  fn worksheets(&self) -> Option<&[Sheet]>;
-
-  fn worksheet<I: SheetIndex>(&self, sheet: T) -> Option<&Sheet>;
+	type Workbook;
+	type Error;
+	
+	fn open<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
+	
+	fn new() -> Workbook;
+	
+	fn worksheets(&self) -> Option<Worksheets<'_>>;
+	
+	fn worksheet<I: SheetIndex>(&self, sheet: T) -> Option<&Worksheet<'_>>;
+	
+	fn add(worksheet: Worksheet)
 } 
 ```
 
 ```rust
-  impl<'cell> Workbook for Xlsx<'cell> {
+  impl<'path, 'cell> Workbook for Xlsx<'path, 'cell> {
 
-    type Workbook<'cell> = Xlsx<'cell>;
+    type Workbook = Xlsx<'path, 'cell>;
     type Error = XlsxError;
-  
-    fn open() -> Result<Self::Workbook<'cell>, Self::Error> {
-      todo!()
+	  
+    fn open<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error> {
+	    todo!()
     }
-  
-    fn worksheets(&self) -> Option<&[Sheet]> {
-      if self.sheets.is_empty() {
-        None
-      } else {
-        &self.sheets
-      }
+	
+	fn new() -> Self::Workbook {
+		todo!()
+	}
+	  
+    fn worksheets(&self) -> Option<Worksheets<'cell>> {
+	    if self.sheets.is_empty() {
+	        None
+		} else {
+	        &self.sheets
+	    }
     }
-
-    fn worksheet<I: SheetIndex>(&self, sheet: I) -> Option<&Sheet> {
+	
+    fn worksheet<I: SheetIndex>(&self, sheet: I) -> Option<&Worksheet<'cell>> {
         self.sheets.get(sheet.into()?)
     }
   }
@@ -308,10 +381,10 @@ trait Workbook {
         if sheet.name() == self {
           return Some(idx);
         }
-
+	
         idx += 1; 
       }
-
+	
       None
     }
   }
@@ -325,7 +398,6 @@ trait Workbook {
 
 ### Sheet
 
-
  Max sheet cells 17,179,869,184. 
   
 ```rust
@@ -335,11 +407,19 @@ pub struct Sheet<'value> {
   // (column, row)
   start: (u32, u32),
   end: (u32, u32),
-  delta: u32,
+  delta: u32, // end.0 - start.0
   cells: Vec<Cell<'value>>,
   default_cell: Cell<'value>,
   #[cfg(feature = "pictures")]
   pictures: Vec<Vec<u8>>,
+}
+```
+
+```rust
+impl Worksheet {
+	resize<R: ToRangeIndex>(&mut self, R) {
+		
+	}
 }
 ```
 
@@ -467,6 +547,7 @@ impl CellIndex for &str {
   /// # Panics
   ///
   /// Will panic if column format is not `a-z` or `A-Z`, or if there is no row number after the column letter/s.
+  #[inline]
   fn excel_column_row_to_tuple(pos: &str) -> (u32, u32) {
       let mut idx = 0;
       
@@ -488,6 +569,7 @@ impl CellIndex for &str {
   /// # Panics
   ///
   /// Will panic if the providec string contains a letter other than `a-z` or `A-Z`.
+  #[inline]
   fn excel_column_to_number(column: &str) -> u32 {
     // PERF: Can hand roll a `to_upper(&mut self)` to prevent an allocation
     let column = column.to_uppercase();
@@ -509,8 +591,9 @@ impl CellIndex for &str {
 ```
 
 ```rust
-fn number_to_excel_column(n: u32) -> String {
-    let mut result = String::new();
+#[inline]
+fn number_to_excel_column(n: u32) -> CompactString {
+    let mut result = CompactString::default();
     let mut n = n;
 
     while n > 0 {
