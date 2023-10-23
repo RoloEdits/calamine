@@ -215,6 +215,9 @@ font.is_strikethrough();
 
 let value: Option<Value<'_>> = cell.value();
 
+
+// Given the expected usage of spreadsheets, the columns are most likley all going to have the same type bar a header.
+// With this knowledge, the value syntax could be cleaned up so you then put the expected type you want, rather than having to match against all the types.
 match value {
     None => println!("no value in cell"),
     Some(value) => match value {
