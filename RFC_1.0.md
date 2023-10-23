@@ -3,7 +3,7 @@
 
 ## Summary
 
-## TODO
+## Things of Note
 
 - [ ] Get rid of `Seek` requirement https://github.com/tafia/calamine/issues/164
 - [ ] maintain/improve support for wasm
@@ -20,27 +20,34 @@
 - [ ] Get cell style/color info https://github.com/tafia/calamine/issues/191
 - [ ] VBA from open docs
 - [ ] Writing files out
-## API
+- [ ] Experiment in the overhead of dynamic dispatch for cells types
+- [ ] File based backend with either a big data format or a file database
+
+## Goals
 
 The main focus of the proposed changes is to:
-- Be more hierarchical in data access. Having a clear ownership of Workbook -> Sheet -> Cell access pattern. The data should belong to the logical scope. Even if potentially out of spec.
-  
-  - Example: A Workbook has a theme, but the colors of a cell can be changed outside of that. The color value should then come through the Cell, using the theme as the default if there is no other color detected.
-  
-  - Example: Pictures are related to a sheet. Even if the spec has a `media` path directly under the Workbook, the pictures should be accessed through the Sheet.
+- Be more hierarchical in data access. Having a clear order of Workbook -> Sheet -> Cell access pattern; The data should belong to the logical scope.  
 
-- Focus on an ergonomic API, with lower exposure of internals. Contrasting the current API to other libraries from other languages, it can be seen that there is some rough edges. There are some areas that can be polished up during the refactor. Just doing the above point on hierarchal ownership would help a lot here.
+  - Example: A Workbook has a theme, and so does a sheet, but the colors of a cell can be changed in scope of the cell. Therefore, the color should then be accessed through the Cell, as thats the final link in the chain that can alter the thing we want.
+
+- Ergonomics, with lower exposure of internals. And on top of conforming to data scope access, there should be a focus on providing straight forward ways to handle various data access patterns.
   
-  - Example: When looking into implementing https://github.com/tafia/calamine/issues/362, it would require a pretty direct breaking change as the `String` type is directly exposed when getting the value out. Instead, exposing a `&str` would allow the backing memory to be an implementation detail.
+  - Example: When looking into implementing [#362](https://github.com/tafia/calamine/issues/362), it would require a pretty direct breaking change as the `String` type is directly exposed when getting the value out. Instead, for example, exposing a `&str` would allow the backing memory to be an implementation detail. Or having getters on the cell to get the value out without ever have to destruct an enum and go through all possible values.  
  
-  - Example: The current `fn worksheets(&mut self) -> Vec<(String, Range<DataType>)>;` returns path information and the cells. These should just be in a Sheet type with fields for `name` and `cells`, accessed through the thing that should logically own it; `sheet.name()` and `sheet.cells()`. Even further, cells could be its own type, further encapsulation the internals.
+  - Example: The current `fn worksheets(&mut self) -> Vec<(String, Range<DataType>)>;` returns path information and the cells. These should just be in a `Worksheet` type with fields for `name`, `path`, `cells`, etc., accessed through the thing that should logically own it: `sheet.name()`, `sheet.path()` and `sheet.cells()`. Even further, a `Cell` should be its own type, further encapsulation the internals.
+ 
+  - Example: Exposing different ways to open workbooks, based on the conditions of the data one has.
+      -  `open()` which will maintain the structure of the workbook and sheets and load it all up front. A method that is very aggressive in both parsing and iterating over the data as fast as possible to matter the memory usage. 
+      -  `open_sparse()` that will remove empty values of cells and make the structure as compact as possible. This will break row-column access but it would be lighter on memory, but might be best for the type of access a user might want. 
+      -  `open_lazy()` that reads and build only the 
+      
+- Performance. This is in terms of wall times, but also memory "performance", i.e. its usage. The goal should be to provide the best performance in our solutions. 
   
-- And using the opportunity in the restructure, there are areas to squeeze more performance.
-  
-  - Example: In `xlsx` files, as an example, there is a shared string component that is linked to by an index in the corresponding sheet/s. In a worse case scenario the sheet have nothing but strings and each string is unique, with no sharing occurring. This means that the shared string file would be at least as long as any given sheet. The parsing of these can files can be done in parallel. The backing string `Vec<T>` can be of an SSO string type, like [`compact_str`](https://github.com/ParkMyCar/compact_str), and only needs to share a reference of `&str`, to the `DataType` enum. The string `Vec` acting as an arena. The `Cell<'value>` then only need to store a `&str` with the index into the string arena, mapping very well to the indexing of the `xlsx` spec. Changing to `Vec` where possible should also improve general performance as look-ups are `O(1)` and they are more cache friendly.
-  
-  - Example: Implementing parallel iteration through [`rayon`](https://github.com/rayon-rs/rayon). This could be an easy performance boost as the backing `Vec`s can be very friendly to this kind of work. The most obvious use case is when iterating over rows.
+  - Example: In `xlsx` files, there is a shared string component that is linked by an index in the corresponding sheet/s. In a worse case scenario the sheet could have nothing but strings, with each string being unique. This means that the shared string file would be at least as long as any given sheet. The parsing of these can files can be done in parallel. The backing string `Vec` can be of an SSO string type, like [`compact_str`](https://github.com/ParkMyCar/compact_str), and only needs to share a reference of `&str`, to the `DataType` enum. The string `Vec` acting as an arena. The `Cell` then only needs to store a `&str` with the index into the string arena, mapping very well to the indexing of the `xlsx` spec. Having a `Vec` where possible should also improve general performance as look-ups are `O(1)` and they are more cache friendly.
 
+- Continuing and expanding outside integrations. Along with `serde`, include support for `rayon`, `polars` and anything else where it makes sense in the scope of various domains where excel might be used in and along side.   
+
+## Proposals Through Examples
 ### Read
 #### Imports
 
@@ -68,6 +75,7 @@ The current `open_workbook_auto()` would go away completely in the new API, opti
 ```rust
 // Gets all the sheets in the workbook. If there are no sheets then return `None`.
 let sheets: Option<Worksheets<'_>> = workbook.worksheets();
+let sheets: Worksheets<'_> = workbook.worksheets_by_name(&["Employees", "Supplies"]);
 
 let author: &str = workbook.author();
 
@@ -160,7 +168,7 @@ for column in sheet.columns() {
 }
 ```
 
-#### Cell 
+#### Cell
 
 ```rust
 
@@ -322,16 +330,49 @@ let mut worksheet: Result<Worksheet<'_>> = Worksheet::new([0, 0], [5, 99]);
 trait Workbook {
 	type Workbook;
 	type Error;
-	
+
+    /// Will read all sheets into memory. The empty value cells are kept in position.
+    /// For opening with empy cells removed and the other cells compacted look to
+    /// `open_sparse`.
 	fn open<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
-	
+
+    /// Will read all sheets into memory but the resulting sheets will be compacted
+    /// with any empty value cells being removed from the structure. 
+    fn open_sparse<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
+
+    /// Opens the workbook while only getting the metadata needed to form a skeleton
+    /// for the rest. Only when used will sheets be read and formed. This will allow
+    /// targeted sheet   
+    fn open_lazy<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
+
+    /// Will read all worksheets into a file on disk.
+    ///
+    /// This is slower than in-memory options, but if the data cannot fit in memory
+    ///  then this will still allow you to read and write values. 
+    ///
+    /// The file type used is not considered part of the API and changes to it can
+    // happen at any time. 
+    fn open_to_disk<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
+
 	fn new() -> Workbook;
-	
+
+    /// Returns all worksheets in the workbook.
 	fn worksheets(&self) -> Option<Worksheets<'_>>;
+
+    /// Returns all asked for sheets. If a sheet asked for does not exist, it will return `None`
+    /// in the same position as it was passed in.  
+    fn worksheets_by_name<S: AsRef<str>>(&self, sheets: &[S]) -> Option<Worksheets<'_>>;
+
+    /// Gets a single worksheet. Will return `None` if the worksheet does not exist.
+	fn worksheet<I: SheetIndex>(&self, sheet: I) -> Option<Worksheet<'_>>  {
+        self.worksheets.get(sheet.into()?)
+    }
 	
-	fn worksheet<I: SheetIndex>(&self, sheet: T) -> Option<&Worksheet<'_>>;
-	
-	fn add(worksheet: Worksheet)
+	fn add_worksheet(worksheet: Worksheet);
+
+    fn save(self);
+
+    fn save_with_writer<W: Writer>(self, writer: W);
 } 
 ```
 
@@ -340,7 +381,7 @@ trait Workbook {
 
     type Workbook = Xlsx<'path, 'cell>;
     type Error = XlsxError;
-	  
+
     fn open<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error> {
 	    todo!()
     }
@@ -355,10 +396,6 @@ trait Workbook {
 		} else {
 	        &self.sheets
 	    }
-    }
-	
-    fn worksheet<I: SheetIndex>(&self, sheet: I) -> Option<&Worksheet<'cell>> {
-        self.sheets.get(sheet.into()?)
     }
   }
 ```
@@ -417,9 +454,11 @@ pub struct Sheet<'value> {
 
 ```rust
 impl Worksheet {
-	resize<R: ToRangeIndex>(&mut self, R) {
+	fn resize<R: ToRangeIndex>(&mut self, R) {
 		
 	}
+
+    fn columns_by_name<C: IntoColumnIndex>(&self, &[C]) -> Columns<'_>;
 }
 ```
 
@@ -722,6 +761,7 @@ pub fn next(&mut self) -> Option<&[Cell<'_>]> {
     formula: Option<&'value str>,
     font: Font,
     fill: Color,
+    format: CompactString, 
   }
 
   impl<'string> Cell<'value> {
@@ -741,7 +781,7 @@ pub enum Value<'value> {
   /// Float
   Float(f64),
   /// String
-  String(&'value str),
+  Text(&'value str),
   /// Boolean
   Bool(bool),
   /// Date or Time
@@ -758,6 +798,7 @@ pub enum Value<'value> {
   Hyperlink(&'value str),
 }
 ```
+
 Passing around the lifetime for strings means that we can choose what ever backing memory we want, for example `compact_str::CompactString` or `smartstring::String`.
 
 We get the benefit of SSO while also keeping the exposed API to a standard `&str`. 
@@ -783,6 +824,37 @@ pub enum CellErrorType {
   /// Getting data
   GettingData,
 }
+```
+
+Another option is to pass around a `Box<dyn Value>` and have types that represent the cells. This way the types can impliment their own `.value()` method.
+```rust
+trait CellValue {
+    type Value;
+    
+    fn value(&self) -> Option<Self::Value>;
+}
+
+Value(Box<dyn CellValue>);
+
+Int(i64);
+Text(CompactStr);
+Float(f64);
+
+impl CellValue for Int {
+    type Value = i64;
+    fn value(&self) -> Option<Self::Value> {
+        self.0
+    }
+}
+
+// Cells would then look like
+struct Cell {
+    value: Value,
+}
+
+// and usage
+let value: Option<i64> = cell.value();
+
 ```
 
 ### Font
