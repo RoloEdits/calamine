@@ -1,4 +1,4 @@
-use crate::wip::{Cell, Font, Grid, Worksheet, XlsxError};
+use crate::wip::{Cell, CellBuilder, Font, Spreadsheet, Type, Worksheet, XlsxError};
 use compact_str::{CompactString, ToCompactString};
 use core::panic;
 use quick_xml::{
@@ -9,6 +9,7 @@ use quick_xml::{
 use std::io::{BufReader, Read, Seek};
 use zip::{result::ZipError, ZipArchive};
 
+#[inline]
 pub(super) fn shared_strings<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
 ) -> Result<Vec<CompactString>, XlsxError> {
@@ -94,6 +95,7 @@ pub(super) fn shared_strings<R: Read + Seek>(
     Ok(strings)
 }
 
+#[inline]
 pub(super) fn theme<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
 ) -> Result<Vec<CompactString>, XlsxError> {
@@ -109,6 +111,7 @@ pub(super) fn theme<R: Read + Seek>(
     todo!()
 }
 
+#[inline]
 pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<Font>, XlsxError> {
     let file = archive.by_name("xl/styles.xml").unwrap();
     let mut reader = Reader::from_reader(BufReader::new(file));
@@ -124,6 +127,7 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
 
     let mut fonts = Vec::new();
     loop {
+        // TODO: validate document is utf8 from `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
         if let Ok(event) = reader.read_event_into(&mut buffer) {
             match event {
                 // TODO: match to "fonts" and break when End is "fonts". Currently we only want the font information, nothing else.
@@ -151,14 +155,14 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
                                                 value: val,
                                             })) = start.attributes().next()
                                             {
-                                                // Split on `.` in "17.000000"
-                                                let integer_part =
-                                            // Take the first match of the split. "17"
-                                            val.split(|val| *val == b'.').next().unwrap();
-
-                                                font.size = CompactString::from_utf8(integer_part)
-                                                    .expect("ascii is valid utf8")
-                                                    .parse()?;
+                                                // SAFETY: document is known valid utf8
+                                                font.size = unsafe {
+                                                    std::str::from_utf8_unchecked(&val)
+                                                        .parse()
+                                                        .expect(
+                                                            "font size should always be a float",
+                                                        )
+                                                };
                                             }
                                         }
 
@@ -176,8 +180,10 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
                                                     color.as_ref()
                                                 };
 
-                                                font.color = CompactString::from_utf8(rgb)
-                                                    .expect("ascii is valid utf8");
+                                                // SAFETY: document is known valid utf8
+                                                font.color = unsafe {
+                                                    CompactString::from_utf8_unchecked(rgb)
+                                                };
                                             }
                                             if let Some(Ok(Attribute {
                                                 key: QName(b"theme"),
@@ -201,8 +207,10 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
                                                 value: val,
                                             })) = start.attributes().next()
                                             {
-                                                font.font = CompactString::from_utf8(val)
-                                                    .expect("ascii is valid utf8");
+                                                // SAFETY: document is known valid utf8
+                                                font.font = unsafe {
+                                                    CompactString::from_utf8_unchecked(val)
+                                                };
                                             }
                                         }
                                     }
@@ -230,21 +238,22 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
     Ok(fonts)
 }
 
-pub(super) fn relationships<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CompactString> {
+pub(super) fn relationships<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Vec<CompactString> {
     todo!()
 }
 
-pub(super) fn workbook<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Vec<CompactString> {
+pub(super) fn workbook<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Vec<CompactString> {
     todo!()
 }
 
-pub(super) fn worksheet<'a, R: Read + Seek>(
+#[inline]
+pub(super) fn worksheet<R: Read + Seek>(
+    worksheet: &mut Worksheet,
     archive: &mut ZipArchive<R>,
     shared_strings: &[CompactString],
-    styles: &'a [Font],
-    worksheet: &str,
-) -> Result<Option<Worksheet>, XlsxError> {
-    let file = match archive.by_name(&format!("xl/worksheets/{worksheet}.xml")) {
+    styles: &[Font],
+) -> Result<Option<()>, XlsxError> {
+    let file = match archive.by_name(&format!("xl/worksheets/{}.xml", worksheet.name)) {
         Ok(ok) => ok,
         Err(ZipError::FileNotFound) => return Ok(None),
         Err(err) => return Err(err.into()),
@@ -262,111 +271,120 @@ pub(super) fn worksheet<'a, R: Read + Seek>(
     let mut cell_buffer: Vec<u8> = Vec::with_capacity(1024);
     let mut value_buffer: Vec<u8> = Vec::with_capacity(1024);
 
-    let mut cells = Grid::new();
-
-    // FIX: looping over cells more than once
-    // FIX: not always getting the attribute data
-    // FIX: sometimes empty values when there shouldnt be
-
-    let mut columns = 0;
-    let mut rows = 0;
     loop {
         if let Ok(event) = reader.read_event_into(&mut buffer) {
             match event {
                 Event::Start(ref start) if start.local_name().as_ref() == b"c" => {
-                    let attributes = start.attributes();
-                    let mut font: Option<Font> = None;
-                    let mut column = 0;
-                    let mut row = 0;
-                    let mut value: Option<CompactString> = None;
+                    let mut attributes = start.attributes();
 
-                    for attribute in attributes {
-                        if let Ok(Attribute {
-                            key: QName(b"r"),
-                            value: ref cell_pos,
-                        }) = attribute
-                        {
-                            let cell_pos =
-                                std::str::from_utf8(cell_pos).expect("ascii is valid utf8");
+                    let mut cell = CellBuilder::new();
 
-                            let (col, rw) = excel_column_row_to_tuple(cell_pos);
+                    let mut shared_string_idx = 0;
 
-                            columns = columns.max(column);
-                            rows = rows.max(row);
+                    // Go through each attribute and take relevant data from them.
+                    // Example: <c r="A1" s="5" t="s">
+                    // Example:  <c r="E1" s="3">
 
-                            column = col;
-                            row = rw;
-                        }
+                    if let Some(Ok(Attribute {
+                        // Cell position.
+                        // Example: "A1"
+                        key: QName(b"r"),
+                        value: ref pos,
+                    })) = attributes.next()
+                    {
+                        // SAFETY: document is known valid utf8
+                        let position = unsafe { std::str::from_utf8_unchecked(pos) };
 
-                        // Style index
-                        if let Ok(Attribute {
-                            key: QName(b"s"),
-                            value: ref style_idx,
-                        }) = attribute
-                        {
-                            let idx: usize = std::str::from_utf8(style_idx)
-                                .expect("ascii is valid utf8")
+                        let (column, row) = excel_column_row_to_tuple(position);
+
+                        cell.position(column, row);
+                    }
+
+                    if let Some(Ok(Attribute {
+                        // Style
+                        key: QName(b"s"),
+                        value: ref style_idx,
+                    })) = attributes.next()
+                    {
+                        let idx: usize = unsafe {
+                            // SAFETY: document is known valid utf8
+                            std::str::from_utf8_unchecked(style_idx)
                                 .parse()
-                                .expect("should always be an integer");
+                                .expect("should always be an integer")
+                        };
 
-                            // TODO: If one is not found, need to use the worksheet theme to default.
-                            // This will be passed in in the future.
-                            let style = match styles.get(idx) {
-                                Some(some) => some,
-                                None => {
-                                    // dbg!(styles);
-                                    // print!(
-                                    //     "index out of bounds: len = {} idx = {idx}",
-                                    //     styles.len()
-                                    // );
-                                    font = None;
-                                    continue;
+                        // TODO: If one is not found, need to use the worksheet theme to default.
+                        // This will be passed in in the future.
+                        let style = match styles.get(idx) {
+                            Some(some) => some.clone(),
+                            None => {
+                                // TODO: will get style from base theme
+                                Font {
+                                    font: CompactString::new("Arial"),
+                                    size: 12.0,
+                                    color: CompactString::new("000000"),
                                 }
-                            };
+                            }
+                        };
 
-                            font = Some(style.clone());
+                        cell.font(style);
+                    }
+
+                    if let Some(Ok(Attribute {
+                        // "t" = Datatype
+                        key: QName(b"t"),
+                        value: ref typ,
+                    })) = attributes.next()
+                    {
+                        match typ.as_ref() {
+                            // shared string
+                            b"s" => {
+                                cell.data_type(Type::String);
+                            }
+                            // in-line string
+                            b"is" => {}
+                            // formula
+                            b"f" => {}
+                            unknown => panic!(
+                                "unknown attribute on cell: `{}`",
+                                std::str::from_utf8(unknown).unwrap()
+                            ),
                         }
+                    }
 
-                        // Datatype
-                        if let Ok(Attribute {
-                            key: QName(b"t"),
-                            value: ref typ,
-                        }) = attribute
-                        {
-                            // `s` = shared string
-                            if typ.as_ref() == b"s" {
-                                cell_buffer.clear();
-                                if let Ok(Event::Start(start)) =
-                                    reader.read_event_into(&mut cell_buffer)
+                    if cell.r#type.is_none() {
+                        cell.data_type(Type::Number);
+                    }
+
+                    // Get relevant value in cell
+                    cell_buffer.clear();
+                    if let Ok(Event::Start(start)) = reader.read_event_into(&mut cell_buffer) {
+                        // Get the value of `<v>VALUE</v>` if it exists. If it doesnt, then the cell will have a vlue of `None`
+                        if start.local_name().as_ref() == b"v" {
+                            if let Ok(Event::Text(text)) = reader.read_event_into(&mut value_buffer)
+                            {
+                                match cell
+                                    .r#type
+                                    .expect("must have a type if there is a value element found")
                                 {
-                                    // Get the value of `<v>VALUE</v>`
-                                    if start.local_name().as_ref() == b"v" {
-                                        if let Ok(Event::Text(text)) =
-                                            reader.read_event_into(&mut value_buffer)
-                                        {
-                                            // Shared string index
-                                            let string_idx: usize = std::str::from_utf8(&text)
-                                                    .expect("ascii is valid utf8")
-                                                    .parse()
-                                                    .expect("should be integer to index into shared strings");
+                                    Type::Number => cell.value(&text.unescape().unwrap()),
+                                    Type::String => {
+                                        let idx: usize = unsafe {
+                                            // SAFETY: document is known valid utf8
+                                            std::str::from_utf8_unchecked(&text).parse().expect(
+                                                "should be integer to index into shared strings",
+                                            )
+                                        };
 
-                                            value = Some(shared_strings[string_idx].clone());
-                                        }
-                                    } else {
-                                        // Defaulting to None as data working with in development time is only shared strings
-                                        value = None;
+                                        cell.value(shared_strings[idx].clone())
                                     }
-                                }
+                                    Type::Formula => todo!(),
+                                };
                             }
                         }
                     }
 
-                    cells.insert(Cell {
-                        value: value.clone(),
-                        column,
-                        row,
-                        font,
-                    });
+                    worksheet.spreadsheet.insert(cell.build());
                 }
                 Event::End(ref end) if end.local_name().as_ref() == b"sheetData" => {
                     break;
@@ -374,23 +392,18 @@ pub(super) fn worksheet<'a, R: Read + Seek>(
                 Event::Eof => {
                     break;
                 }
-                _ => {
-                    continue;
-                }
+                _ => continue,
             }
         }
     }
 
-    Ok(Some(Worksheet {
-        name: worksheet.to_compact_string(),
-        grid: cells,
-        size: (columns, rows),
-    }))
+    Ok(Some(()))
 }
 
 /// # Panics
 ///
 /// Will panic if column format is not `a-z` or `A-Z`, or if there is no row number after the column letter/s.
+#[inline]
 fn excel_column_row_to_tuple(pos: &str) -> (u32, u32) {
     let mut idx = 0;
 
@@ -406,12 +419,13 @@ fn excel_column_row_to_tuple(pos: &str) -> (u32, u32) {
     let row: u32 = pos[idx..].parse().unwrap();
 
     // zero based position
-    (column, row - 1)
+    (column - 1, row - 1)
 }
 
 /// # Panics
 ///
 /// Will panic if the provided string contains a letter other than `a-z` or `A-Z`.
+#[inline]
 fn excel_column_to_number(column: &str) -> u32 {
     let column = to_uppercase_compact_str(column);
     let mut result = 0;
@@ -423,24 +437,29 @@ fn excel_column_to_number(column: &str) -> u32 {
             result += digit * multiplier;
             multiplier *= 26;
         } else {
+            // break;
             // If the string contains non-alphabetic characters panic
             panic!("`{char}` is not a valid column letter must be `A-Z`")
         }
     }
 
-    // zero based position
-    result - 1
+    result
 }
 
+#[inline]
 fn to_uppercase_compact_str(string: &str) -> CompactString {
     // NOTE: maximum number of columns is 16,384 or `XFD`
-    let mut compact_str = CompactString::with_capacity(3);
+    assert!(string.len() < 4);
+    let len = string.len();
 
-    for char in string.chars() {
-        compact_str.push(char.to_ascii_uppercase());
+    let mut char_array: [u8; 3] = [0; 3];
+
+    for (idx, char) in string.chars().enumerate() {
+        char_array[idx] = char.to_ascii_uppercase() as u8;
     }
 
-    compact_str
+    // SAFETY: Input is a `&str` and `to_ascii_uppercase` returns a valid ascii.
+    unsafe { CompactString::from_utf8_unchecked(&char_array[..len]) }
 }
 
 #[cfg(test)]
