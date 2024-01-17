@@ -1,12 +1,15 @@
-use crate::wip::{Cell, CellBuilder, Font, Spreadsheet, Type, Worksheet, XlsxError};
-use compact_str::{CompactString, ToCompactString};
+use crate::wip::{Cell, Font, Type, Worksheet, XlsxError};
+use compact_str::CompactString;
 use core::panic;
 use quick_xml::{
     events::{attributes::Attribute, Event},
     name::QName,
     Reader,
 };
-use std::io::{BufReader, Read, Seek};
+use std::{
+    any::Any,
+    io::{BufReader, Read, Seek},
+};
 use zip::{result::ZipError, ZipArchive};
 
 #[inline]
@@ -277,7 +280,7 @@ pub(super) fn worksheet<R: Read + Seek>(
                 Event::Start(ref start) if start.local_name().as_ref() == b"c" => {
                     let mut attributes = start.attributes();
 
-                    let mut cell = CellBuilder::new();
+                    let mut cell = Cell::default();
 
                     let mut shared_string_idx = 0;
 
@@ -297,7 +300,8 @@ pub(super) fn worksheet<R: Read + Seek>(
 
                         let (column, row) = excel_column_row_to_tuple(position);
 
-                        cell.position(column, row);
+                        cell.column = column;
+                        cell.row = row;
                     }
 
                     if let Some(Ok(Attribute {
@@ -315,7 +319,7 @@ pub(super) fn worksheet<R: Read + Seek>(
 
                         // TODO: If one is not found, need to use the worksheet theme to default.
                         // This will be passed in in the future.
-                        let style = match styles.get(idx) {
+                        let font = match styles.get(idx) {
                             Some(some) => some.clone(),
                             None => {
                                 // TODO: will get style from base theme
@@ -327,7 +331,7 @@ pub(super) fn worksheet<R: Read + Seek>(
                             }
                         };
 
-                        cell.font(style);
+                        cell.font = font;
                     }
 
                     if let Some(Ok(Attribute {
@@ -339,12 +343,15 @@ pub(super) fn worksheet<R: Read + Seek>(
                         match typ.as_ref() {
                             // shared string
                             b"s" => {
-                                cell.data_type(Type::String);
+                                cell.r#type = Some(Type::String);
                             }
                             // in-line string
                             b"is" => {}
                             // formula
                             b"f" => {}
+                            b"n" => {
+                                cell.r#type = Some(Type::Number);
+                            }
                             unknown => panic!(
                                 "unknown attribute on cell: `{}`",
                                 std::str::from_utf8(unknown).unwrap()
@@ -353,7 +360,7 @@ pub(super) fn worksheet<R: Read + Seek>(
                     }
 
                     if cell.r#type.is_none() {
-                        cell.data_type(Type::Number);
+                        cell.r#type = Some(Type::Number);
                     }
 
                     // Get relevant value in cell
@@ -367,7 +374,10 @@ pub(super) fn worksheet<R: Read + Seek>(
                                     .r#type
                                     .expect("must have a type if there is a value element found")
                                 {
-                                    Type::Number => cell.value(&text.unescape().unwrap()),
+                                    Type::Number => {
+                                        cell.value =
+                                            Some(CompactString::new(&text.unescape().unwrap()))
+                                    }
                                     Type::String => {
                                         let idx: usize = unsafe {
                                             // SAFETY: document is known valid utf8
@@ -376,7 +386,7 @@ pub(super) fn worksheet<R: Read + Seek>(
                                             )
                                         };
 
-                                        cell.value(shared_strings[idx].clone())
+                                        cell.value = Some(shared_strings[idx].clone());
                                     }
                                     Type::Formula => todo!(),
                                 };
@@ -384,7 +394,7 @@ pub(super) fn worksheet<R: Read + Seek>(
                         }
                     }
 
-                    worksheet.spreadsheet.insert(cell.build());
+                    worksheet.spreadsheet.insert(cell);
                 }
                 Event::End(ref end) if end.local_name().as_ref() == b"sheetData" => {
                     break;
