@@ -6,10 +6,7 @@ use quick_xml::{
     name::QName,
     Reader,
 };
-use std::{
-    any::Any,
-    io::{BufReader, Read, Seek},
-};
+use std::io::{BufReader, Read, Seek};
 use zip::{result::ZipError, ZipArchive};
 
 #[inline]
@@ -100,9 +97,9 @@ pub(super) fn shared_strings<R: Read + Seek>(
 
 #[inline]
 pub(super) fn theme<R: Read + Seek>(
-    zip: &mut ZipArchive<R>,
+    archive: &mut ZipArchive<R>,
 ) -> Result<Vec<CompactString>, XlsxError> {
-    let file = zip.by_name("xl/theme/theme1.xml").unwrap();
+    let file = archive.by_name("xl/theme/theme1.xml").unwrap();
     let mut reader = Reader::from_reader(BufReader::new(file));
 
     reader
@@ -282,8 +279,6 @@ pub(super) fn worksheet<R: Read + Seek>(
 
                     let mut cell = Cell::default();
 
-                    let mut shared_string_idx = 0;
-
                     // Go through each attribute and take relevant data from them.
                     // Example: <c r="A1" s="5" t="s">
                     // Example:  <c r="E1" s="3">
@@ -349,6 +344,7 @@ pub(super) fn worksheet<R: Read + Seek>(
                             b"is" => {}
                             // formula
                             b"f" => {}
+                            // number
                             b"n" => {
                                 cell.r#type = Some(Type::Number);
                             }
