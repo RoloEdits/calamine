@@ -2,15 +2,54 @@ pub mod xlsx;
 pub use xlsx::{Xlsx, XlsxError};
 
 use compact_str::{CompactString, ToCompactString};
-use std::{fmt::Display, path::Path};
+use core::panic;
+use std::path::Path;
 
-pub trait Workbook {
+// Here so that there is a cleaner API.
+// Rather than having the logic fall to the implimentee, matching on an exstention
+// we can just do it here and allow a simple `Workbook::open()` that will take any of the supported file exstentions.
+pub enum Workbook {
+    Xlsx(Xlsx),
+}
+
+impl Workbook {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let workbook = match path
+            .as_ref()
+            .extension()
+            .expect("file must have exstention")
+            .to_str()
+            .unwrap()
+        {
+            "xlsx" => {
+                let xslx = Xlsx::open(path)?;
+                Workbook::Xlsx(xslx)
+            }
+            unsupported => panic!("unsupported file type `{unsupported}`"),
+        };
+
+        Ok(workbook)
+    }
+
+    pub fn worksheet(
+        &mut self,
+        worksheet: impl AsRef<str>,
+    ) -> Result<Option<&Worksheet>, Box<dyn std::error::Error>> {
+        let worksheet = match self {
+            Workbook::Xlsx(xlsx) => xlsx.worksheet(worksheet)?,
+        };
+
+        Ok(worksheet)
+    }
+}
+
+trait WorkbookTrait {
     type Workbook;
     type Error: std::error::Error;
 
     fn open<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
 
-    fn worksheet(&mut self, sheet: &str) -> Result<Option<&Worksheet>, Self::Error>;
+    fn worksheet(&mut self, worksheet: impl AsRef<str>) -> Result<Option<&Worksheet>, Self::Error>;
 
     fn worksheets(&self) -> &[Worksheet];
 }
@@ -39,6 +78,14 @@ impl Worksheet {
         }
     }
 
+    // #[inline]
+    // pub fn rows_mut(&mut self) -> RowsMut<'_> {
+    //     RowsMut {
+    //         spreadsheet: &mut self.spreadsheet,
+    //         row: 0,
+    //     }
+    // }
+
     #[inline]
     pub fn column(&self, column: u32) -> Column<'_> {
         Column {
@@ -65,175 +112,6 @@ impl Worksheet {
     pub fn size(&self) -> (u32, u32) {
         self.spreadsheet.size()
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Cell {
-    value: Option<CompactString>,
-    r#type: Type,
-    column: u32,
-    row: u32,
-    font: Font,
-}
-
-#[derive(Debug)]
-struct CellBuilder {
-    value: Option<CompactString>,
-    r#type: Option<Type>,
-    column: Option<u32>,
-    row: Option<u32>,
-    font: Option<Font>,
-}
-
-// TODO: Remove and just have the setters on `Cell`
-impl CellBuilder {
-    fn new() -> Self {
-        Self {
-            value: None,
-            r#type: None,
-            column: None,
-            row: None,
-            font: None,
-        }
-    }
-
-    fn value(&mut self, value: impl Display) -> &mut Self {
-        self.value = Some(value.to_compact_string());
-        self
-    }
-
-    fn data_type(&mut self, data_type: Type) -> &mut Self {
-        self.r#type = Some(data_type);
-        self
-    }
-
-    fn position(&mut self, column: u32, row: u32) -> &mut Self {
-        self.column = Some(column);
-        self.row = Some(row);
-        self
-    }
-
-    fn font(&mut self, font: Font) -> &mut Self {
-        self.font = Some(font);
-        self
-    }
-
-    fn build(&self) -> Cell {
-        Cell {
-            value: self.value.clone(),
-            r#type: self.r#type.unwrap_or(Type::String),
-            column: self.column.unwrap(),
-            row: self.row.unwrap(),
-            font: self
-                .font
-                .as_ref()
-                .unwrap_or(&Font {
-                    font: "Arial".to_compact_string(),
-                    size: 12.0,
-                    color: "000000".to_compact_string(),
-                })
-                .clone(),
-        }
-    }
-}
-
-impl Cell {
-    // pub fn default_with_position(column: u32, row: u32) -> Self {
-    //     Self {
-    //         value: None,
-    //         column,
-    //         row,
-    //         font: None,
-    //         r#type: ,
-    //     }
-    // }
-
-    #[inline]
-    pub fn value(&self) -> Option<&str> {
-        match self.value.as_ref() {
-            Some(value) => Some(value.as_str()),
-            None => None,
-        }
-    }
-
-    #[inline]
-    pub fn font(&self) -> &Font {
-        self.font.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Type {
-    Number,
-    String,
-    Formula,
-}
-
-pub struct Rows<'a> {
-    spreadsheet: &'a Spreadsheet,
-    row: u32,
-}
-
-impl<'a> Iterator for Rows<'a> {
-    type Item = Row<'a>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = Some(Row {
-            cells: self.spreadsheet.row(self.row)?,
-            columns: self.spreadsheet.buffer_columns,
-            row: self.row,
-        });
-
-        self.row += 1;
-
-        item
-    }
-}
-
-#[derive(Debug)]
-pub struct Row<'a> {
-    cells: &'a [Cell],
-    columns: u32,
-    row: u32,
-}
-
-impl<'a> Row<'a> {
-    #[inline]
-    pub fn column(&self, column: usize) -> Option<&Cell> {
-        self.cells.get(column)
-    }
-}
-
-// FIX: never reaches None and always returns the same cell
-impl<'a> Iterator for Row<'a> {
-    type Item = &'a Cell;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.cells.iter().next()
-    }
-}
-
-pub struct Column<'a> {
-    spreadsheet: &'a Spreadsheet,
-    column: u32,
-    row: u32,
-}
-
-impl<'a> Iterator for Column<'a> {
-    type Item = &'a Cell;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.spreadsheet.column(self.column, self.row);
-        self.row += 1;
-        item
-    }
-}
-
-pub struct Window<'a> {
-    spreadsheet: &'a Spreadsheet,
 }
 
 // PERF: can add variables that hold the lowest cell row and column position and use that as an offset for the buffer size.
@@ -270,7 +148,7 @@ impl Spreadsheet {
 
         for row in 0..rows {
             for column in 0..columns {
-                let cell = CellBuilder::new().position(column, row).build();
+                let cell = Cell::new(column, row);
                 cells.push(cell);
             }
         }
@@ -284,6 +162,7 @@ impl Spreadsheet {
         }
     }
 
+    // PERF: If the new dimensions are the same as the old, just different columns and rows, can reuse the existing buffer.
     // WARN: Off-by-one hell.
     // Cells use a zero based position, but the columns and rows count is 1 based.
     // 0 columns and 0 rows indicate no cells in the spreadsheet and is therefore used in the `new` implementation.
@@ -304,7 +183,8 @@ impl Spreadsheet {
             // Fill with empty cells with the correct position set
             for row in 0..self.buffer_rows {
                 for column in 0..self.buffer_columns {
-                    cells.push(CellBuilder::new().position(column, row).build())
+                    let cell = Cell::new(column, row);
+                    cells.push(cell);
                 }
             }
 
@@ -336,8 +216,8 @@ impl Spreadsheet {
 
             for row in self.buffer_rows..rows {
                 for column in 0..self.buffer_columns {
-                    self.cells
-                        .push(CellBuilder::new().position(column, row).build());
+                    let cell = Cell::new(column, row);
+                    self.cells.push(cell);
                 }
             }
 
@@ -372,6 +252,18 @@ impl Spreadsheet {
     }
 
     #[inline]
+    pub fn row_mut(&mut self, row: u32) -> Option<&mut [Cell]> {
+        // If self.columns is 0, then index becomes `0..0` which is in range for a `Spreadsheet::new()` spreadsheet.
+        // Meaning that it would always return `Some([])` causing an infinite loop if used as a iterator.
+        if self.cells.is_empty() {
+            return None;
+        }
+
+        let idx = (row * self.columns) as usize..((row + 1) * self.columns) as usize;
+        self.cells.get_mut(idx)
+    }
+
+    #[inline]
     pub fn column(&self, column: u32, row: u32) -> Option<&Cell> {
         self.cells.get((row * self.columns + column) as usize)
     }
@@ -379,6 +271,213 @@ impl Spreadsheet {
     pub fn size(&self) -> (u32, u32) {
         (self.columns, self.rows)
     }
+}
+
+// pub struct Window<'a> {
+//     spreadsheet: &'a Spreadsheet,
+// }
+
+pub struct Rows<'a> {
+    spreadsheet: &'a Spreadsheet,
+    row: u32,
+}
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = Row<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = Some(Row {
+            cells: self.spreadsheet.row(self.row)?,
+            columns: self.spreadsheet.buffer_columns,
+            row: self.row,
+        });
+
+        self.row += 1;
+
+        item
+    }
+}
+
+// pub struct RowsMut<'a> {
+//     spreadsheet: &'a mut Spreadsheet,
+//     row: u32,
+// }
+
+// impl<'a> Iterator for RowsMut<'a> {
+//     type Item = RowMut<'a>;
+
+//     #[inline]
+//     fn next(&mut self) -> Option<Self::Item> {
+//         let item = Some(RowMut {
+//             cells: &mut self.spreadsheet.row_mut(self.row)?,
+//             columns: self.spreadsheet.buffer_columns,
+//             row: self.row,
+//         });
+
+//         self.row += 1;
+
+//         item
+//     }
+// }
+
+#[derive(Debug)]
+pub struct Row<'a> {
+    cells: &'a [Cell],
+    columns: u32,
+    row: u32,
+}
+
+impl<'a> Row<'a> {
+    #[inline]
+    pub fn column(&self, column: usize) -> Option<&Cell> {
+        self.cells.get(column)
+    }
+}
+
+// FIX: never reaches None and always returns the same cell
+impl<'a> Iterator for Row<'a> {
+    type Item = &'a Cell;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cells.iter().next()
+    }
+}
+
+// #[derive(Debug)]
+// pub struct RowMut<'a> {
+//     cells: &'a mut [Cell],
+//     columns: u32,
+//     row: u32,
+// }
+
+pub struct Column<'a> {
+    spreadsheet: &'a Spreadsheet,
+    column: u32,
+    row: u32,
+}
+
+impl<'a> Iterator for Column<'a> {
+    type Item = &'a Cell;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.spreadsheet.column(self.column, self.row);
+        self.row += 1;
+        item
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Cell {
+    value: Option<CompactString>,
+    r#type: Option<Type>,
+    column: u32,
+    row: u32,
+    font: Font,
+}
+
+impl Cell {
+    pub fn new(column: u32, row: u32) -> Self {
+        Self {
+            value: None,
+            column,
+            row,
+            font: Font::default(),
+            r#type: None,
+        }
+    }
+
+    #[inline]
+    pub fn value(&self) -> Option<&str> {
+        match self.value.as_ref() {
+            Some(value) => Some(value.as_str()),
+            None => None,
+        }
+    }
+
+    pub fn insert_value<V: IntoCellValue>(&mut self, value: V) {
+        let (value, r#type) = value.into();
+        self.r#type = Some(r#type);
+        self.value = Some(value);
+    }
+
+    #[inline]
+    pub fn font(&self) -> &Font {
+        self.font.as_ref()
+    }
+}
+
+pub trait IntoCellValue {
+    fn into(self) -> (CompactString, Type);
+}
+
+impl IntoCellValue for i32 {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for u32 {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for i64 {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for u64 {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for usize {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for isize {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for f32 {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for f64 {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::Number)
+    }
+}
+
+impl IntoCellValue for &str {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::String)
+    }
+}
+
+impl IntoCellValue for String {
+    fn into(self) -> (CompactString, Type) {
+        (self.to_compact_string(), Type::String)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Type {
+    Number,
+    String,
+    Formula,
 }
 
 #[derive(Debug, Default, Clone)]
