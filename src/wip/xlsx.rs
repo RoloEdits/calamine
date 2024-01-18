@@ -7,7 +7,7 @@ use zip::ZipArchive;
 
 pub use self::error::XlsxError;
 
-use super::{Font, Spreadsheet, Workbook, Worksheet};
+use super::{Font, Spreadsheet, WorkbookTrait, Worksheet};
 
 pub struct Xlsx {
     archive: ZipArchive<BufReader<File>>,
@@ -18,7 +18,7 @@ pub struct Xlsx {
     worksheets: Vec<Worksheet>,
 }
 
-impl Workbook for Xlsx {
+impl WorkbookTrait for Xlsx {
     type Workbook = Xlsx;
     type Error = XlsxError;
 
@@ -64,9 +64,9 @@ impl Workbook for Xlsx {
         })
     }
 
-    fn worksheet(&mut self, worksheet: &str) -> Result<Option<&Worksheet>, Self::Error> {
+    fn worksheet(&mut self, worksheet: impl AsRef<str>) -> Result<Option<&Worksheet>, Self::Error> {
         for _worksheet in self.worksheets.iter_mut() {
-            if _worksheet.name == worksheet.to_lowercase() {
+            if _worksheet.name == worksheet.as_ref().to_lowercase() {
                 if let Ok(Some(_)) = parse::worksheet(
                     _worksheet,
                     &mut self.archive,
