@@ -56,6 +56,7 @@
 //! }
 //! ```
 // #![deny(missing_docs)]
+// #![feature(test)]
 
 #[macro_use]
 mod utils;
@@ -76,7 +77,7 @@ pub mod vba;
 #[allow(missing_docs)]
 pub mod wip;
 
-use datatype::DataTypeRef;
+// use datatype::DataTypeRef;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::cmp::{max, min};

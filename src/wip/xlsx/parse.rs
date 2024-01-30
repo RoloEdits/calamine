@@ -1,4 +1,4 @@
-use crate::wip::{Cell, Font, Type, Worksheet, XlsxError};
+use crate::wip::{cell::Type, Cell, Error, Worksheet};
 use compact_str::CompactString;
 use core::panic;
 use quick_xml::{
@@ -6,14 +6,17 @@ use quick_xml::{
     name::QName,
     Reader,
 };
-use std::io::{BufReader, Read, Seek};
+use std::{
+    borrow::Cow,
+    io::{BufReader, Read, Seek},
+};
 use zip::{result::ZipError, ZipArchive};
 
 #[inline]
 pub(super) fn shared_strings<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
-) -> Result<Vec<CompactString>, XlsxError> {
-    let file = archive.by_name("xl/sharedStrings.xml").unwrap();
+) -> Result<Vec<CompactString>, Error> {
+    let file = archive.by_name("xl/sharedStrings.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
     reader
@@ -61,10 +64,11 @@ pub(super) fn shared_strings<R: Read + Seek>(
                                 loop {
                                     match reader.read_event_into(&mut inner_inner_buffer).unwrap() {
                                         Event::Text(t) => {
-                                            strings.push(CompactString::new(&t.unescape().unwrap()))
+                                            strings
+                                                .push(CompactString::new(&t.unescape().unwrap()));
                                         }
                                         Event::End(end) if end.name() == e.name() => break,
-                                        Event::Eof => return Err(XlsxError::XmlEof("t")),
+                                        Event::Eof => return Err(Error::XmlEof("t")),
                                         _ => (),
                                     }
                                 }
@@ -96,9 +100,9 @@ pub(super) fn shared_strings<R: Read + Seek>(
 }
 
 #[inline]
-pub(super) fn theme<R: Read + Seek>(
+pub(super) fn _theme<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
-) -> Result<Vec<CompactString>, XlsxError> {
+) -> Result<Vec<CompactString>, Error> {
     let file = archive.by_name("xl/theme/theme1.xml").unwrap();
     let mut reader = Reader::from_reader(BufReader::new(file));
 
@@ -111,9 +115,10 @@ pub(super) fn theme<R: Read + Seek>(
     todo!()
 }
 
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[inline]
-pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<Font>, XlsxError> {
-    let file = archive.by_name("xl/styles.xml").unwrap();
+pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Styles, Error> {
+    let file = archive.by_name("xl/styles.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
     reader
@@ -122,111 +127,384 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
         .check_comments(false)
         .expand_empty_elements(true);
 
-    let mut buffer = Vec::with_capacity(1024);
-    let mut inner_buffer = Vec::with_capacity(1024);
+    let mut buf_1 = Vec::with_capacity(1024);
+    let mut buf_2 = Vec::with_capacity(1024);
+    let mut buf_3 = Vec::with_capacity(1024);
 
-    let mut fonts = Vec::new();
-    loop {
+    let mut styles = Styles::default();
+    'outer: loop {
         // TODO: validate document is utf8 from `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
-        if let Ok(event) = reader.read_event_into(&mut buffer) {
+        if let Ok(event) = reader.read_event_into(&mut buf_1) {
             match event {
-                // TODO: match to "fonts" and break when End is "fonts". Currently we only want the font information, nothing else.
-                Event::Start(ref start) => {
-                    if start.local_name().as_ref() == b"font" {
-                        let mut font = Font::default();
-                        // TODO: Need to go through the other elements. I was trying to get attributes for font but there are none.
+                // Event::Start(ref start) if start.local_name().as_ref() == b"numFmts" => {}
+                Event::Start(ref start) if start.local_name().as_ref() == b"fonts" => {
+                    // <fonts count="45">
+                    if let Some(Ok(Attribute {
+                        key: QName(b"count"),
+                        value: fonts_count,
+                    })) = start.attributes().next()
+                    {
+                        styles.fonts.count = unsafe {
+                            std::str::from_utf8_unchecked(&fonts_count)
+                                .parse::<u32>()
+                                .expect("font count should always be a valid ascii number")
+                        };
+                    }
 
-                        // <font>
-                        //     <b />
-                        //     <sz val="17.000000" />
-                        //     <color indexed="2" />
-                        //     <name val="Arial" />
-                        // </font>
+                    let mut f_count = 0;
+                    loop {
+                        buf_2.clear();
+                        if let Ok(event) = reader.read_event_into(&mut buf_2) {
+                            match event {
+                                Event::Start(start) if start.local_name().as_ref() == b"font" => {
+                                    //     <font>
+                                    //         <b />
+                                    //         <sz val="17.000000" />
+                                    //         <color indexed="2" />
+                                    //         <name val="Arial" />
+                                    //     </font>
 
-                        loop {
-                            inner_buffer.clear();
+                                    let mut font = Font::default();
 
-                            if let Ok(event) = reader.read_event_into(&mut inner_buffer) {
-                                match event {
-                                    Event::Start(ref start) => {
-                                        if start.local_name().as_ref() == b"sz" {
-                                            if let Some(Ok(Attribute {
-                                                key: QName(b"val"),
-                                                value: val,
-                                            })) = start.attributes().next()
-                                            {
-                                                // SAFETY: document is known valid utf8
-                                                font.size = unsafe {
-                                                    std::str::from_utf8_unchecked(&val)
-                                                        .parse()
-                                                        .expect(
-                                                            "font size should always be a float",
-                                                        )
-                                                };
+                                    loop {
+                                        buf_3.clear();
+                                        if let Ok(event) = reader.read_event_into(&mut buf_3) {
+                                            match event {
+                                                Event::Start(ref start)
+                                                    if start.local_name().as_ref() == b"sz" =>
+                                                {
+                                                    if let Some(Ok(Attribute {
+                                                        key: QName(b"val"),
+                                                        value: val,
+                                                    })) = start.attributes().next()
+                                                    {
+                                                        font.sz = unsafe {
+                                                            // SAFETY: document is known valid utf8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                                    .parse()
+                                                                    .expect("font size should always be a float")
+                                                        };
+                                                    }
+                                                }
+                                                Event::Start(ref start)
+                                                    if start.local_name().as_ref() == b"color" =>
+                                                {
+                                                    if let Some(Ok(Attribute {
+                                                        key: QName(b"rgb"),
+                                                        value: color,
+                                                    })) = start.attributes().next()
+                                                    {
+                                                        font.color = unsafe {
+                                                            Some(Color::Argb(
+                                                                // SAFETY: document is known valid utf8
+                                                                CompactString::from_utf8_unchecked(
+                                                                    &color,
+                                                                ),
+                                                            ))
+                                                        };
+                                                    }
+
+                                                    if let Some(Ok(Attribute {
+                                                        key: QName(b"theme"),
+                                                        value: theme,
+                                                    })) = start.attributes().next()
+                                                    {
+                                                        let theme: u32 = unsafe {
+                                                            std::str::from_utf8_unchecked(&theme)
+                                                                .parse()?
+                                                        };
+
+                                                        let mut tint: Option<f32> = None;
+
+                                                        if let Some(Ok(Attribute {
+                                                            key: QName(b"tint"),
+                                                            value: val,
+                                                        })) = start.attributes().next()
+                                                        {
+                                                            tint = Some(unsafe {
+                                                                std::str::from_utf8_unchecked(&val)
+                                                                    .parse()
+                                                                    .expect("tint must be float")
+                                                            });
+                                                        }
+
+                                                        font.color =
+                                                            Some(Color::Theme { theme, tint });
+                                                    }
+
+                                                    if let Some(Ok(Attribute {
+                                                        key: QName(b"indexed"),
+                                                        value: idx,
+                                                    })) = start.attributes().next()
+                                                    {
+                                                        let idx = unsafe {
+                                                            std::str::from_utf8_unchecked(&idx)
+                                                                .parse()?
+                                                        };
+                                                        font.color = Some(Color::Indexed(idx));
+                                                    }
+                                                }
+                                                Event::Start(ref start)
+                                                    if start.local_name().as_ref() == b"name" =>
+                                                {
+                                                    if let Some(Ok(Attribute {
+                                                        key: QName(b"val"),
+                                                        value: val,
+                                                    })) = start.attributes().next()
+                                                    {
+                                                        font.name = unsafe {
+                                                            // SAFETY: document is known valid utf8
+                                                            CompactString::from_utf8_unchecked(val)
+                                                        };
+                                                    }
+                                                }
+                                                Event::End(end)
+                                                    if end.local_name().as_ref() == b"font" =>
+                                                {
+                                                    break
+                                                }
+                                                _ => continue,
                                             }
                                         }
+                                    }
+                                    styles.fonts.add(font);
+                                    f_count += 1;
+                                }
+                                Event::End(end) if end.local_name().as_ref() == b"fonts" => {
+                                    // Gone through all `font` elements, start to go through other collections.
+                                    // Check that the expected font count is achieved.
+                                    debug_assert_eq!(styles.fonts.count, f_count);
+                                    continue 'outer;
+                                }
+                                _ => continue,
+                            }
+                        }
+                    }
+                }
+                // TODO: Go through other collections
+                // Event::Start(ref start) if start.local_name().as_ref() == b"fills" => {}
+                // Event::Start(ref start) if start.local_name().as_ref() == b"borders" => {}
+                // Event::Start(ref start) if start.local_name().as_ref() == b"cellStyleXfs" => {}
+                Event::Start(ref start) if start.local_name().as_ref() == b"cellXfs" => {
+                    if let Some(Ok(Attribute {
+                        key: QName(b"count"),
+                        value: val,
+                    })) = start.attributes().next()
+                    {
+                        styles.cells_xfs.count = unsafe {
+                            // SAFETY: document is known utf-8
+                            std::str::from_utf8_unchecked(&val).parse::<u32>()?
+                        };
+                    }
 
-                                        if start.local_name().as_ref() == b"color" {
-                                            if let Some(Ok(Attribute {
-                                                key: QName(b"rgb"),
-                                                value: color,
-                                            })) = start.attributes().next()
-                                            {
-                                                let rgb = if color.len() > 6 {
-                                                    // removes `FF` from "FFD3D1A2"
-                                                    &color.as_ref()[2..]
-                                                } else {
-                                                    // otherwise just return the a normal rgb hex.
-                                                    color.as_ref()
-                                                };
+                    loop {
+                        buf_2.clear();
+                        if let Ok(event) = reader.read_event_into(&mut buf_2) {
+                            match event {
+                                Event::Start(start) if start.local_name().as_ref() == b"xf" => {
+                                    // <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyFont="false"
+                                    //     applyBorder="false" applyAlignment="false" applyProtection="false">
+                                    //     <alignment horizontal="general" vertical="bottom" textRotation="0" wrapText="false"
+                                    //         indent="0" shrinkToFit="false" />
+                                    //     <protection locked="true" hidden="false" />
+                                    // </xf>
 
-                                                // SAFETY: document is known valid utf8
-                                                font.color = unsafe {
-                                                    CompactString::from_utf8_unchecked(rgb)
-                                                };
-                                            }
-                                            if let Some(Ok(Attribute {
-                                                key: QName(b"theme"),
-                                                value: _,
-                                            })) = start.attributes().next()
-                                            {
-                                                font.color = CompactString::new("FFFFFF");
-                                            }
-                                            if let Some(Ok(Attribute {
-                                                key: QName(b"indexed"),
-                                                value: _,
-                                            })) = start.attributes().next()
-                                            {
-                                                font.color = CompactString::new("FFFFFF");
+                                    let mut xf = Xf::default();
+
+                                    for attribute in start.attributes() {
+                                        match attribute {
+                                            Err(err) => panic!("{:?}", err),
+                                            Ok(ok) => {
+                                                match ok {
+                                                    Attribute {
+                                                        key: QName(b"numFmtId"),
+                                                        value: val,
+                                                    } => {
+                                                        xf.num_fmt_id = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                                .parse::<u32>()?
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"fontId"),
+                                                        value: val,
+                                                    } => {
+                                                        xf.font_id = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                                .parse::<usize>()?
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"fillId"),
+                                                        value: val,
+                                                    } => {
+                                                        xf.fill_id = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                                .parse::<u32>()?
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"borderId"),
+                                                        value: val,
+                                                    } => {
+                                                        xf.border_id = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                                .parse::<u32>()?
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"xfId"),
+                                                        value: val,
+                                                    } => {
+                                                        xf.xf_id = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                                .parse::<u32>()?
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"applyFont"),
+                                                        value: val,
+                                                    } => {
+                                                        let str = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                        };
+
+                                                        // NOTE: can be "1" or "0"
+                                                        xf.apply_font = if str.len() == 1 {
+                                                            let int = str.parse::<u8>().unwrap();
+
+                                                            matches!(int, 1)
+                                                        } else {
+                                                            str.parse::<bool>()
+                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"applyBorder"),
+                                                        value: val,
+                                                    } => {
+                                                        let str = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                        };
+
+                                                        // NOTE: can be "1" or "0"
+                                                        xf.apply_border = if str.len() == 1 {
+                                                            let int = str.parse::<u8>().unwrap();
+
+                                                            matches!(int, 1)
+                                                        } else {
+                                                            str.parse::<bool>()
+                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"applyAlignment"),
+                                                        value: val,
+                                                    } => {
+                                                        let str = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                        };
+
+                                                        // NOTE: can be "1" or "0"
+                                                        xf.apply_alignment = if str.len() == 1 {
+                                                            let int = str.parse::<u8>().unwrap();
+
+                                                            matches!(int, 1)
+                                                        } else {
+                                                            str.parse::<bool>()
+                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
+                                                        };
+                                                    }
+
+                                                    Attribute {
+                                                        key: QName(b"applyProtection"),
+                                                        value: val,
+                                                    } => {
+                                                        let str = unsafe {
+                                                            // SAFETY: document is known utf-8
+                                                            std::str::from_utf8_unchecked(&val)
+                                                        };
+
+                                                        // NOTE: can be "1" or "0"
+                                                        xf.apply_protection = if str.len() == 1 {
+                                                            let int = str.parse::<u8>().unwrap();
+
+                                                            matches!(int, 1)
+                                                        } else {
+                                                            str.parse::<bool>()
+                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
+                                                        };
+                                                    }
+
+                                                    _ => unreachable!(
+                                                        "unknown attribute found on `xf` element"
+                                                    ),
+                                                }
                                             }
                                         }
+                                    }
 
-                                        if start.local_name().as_ref() == b"name" {
-                                            if let Some(Ok(Attribute {
-                                                key: QName(b"val"),
-                                                value: val,
-                                            })) = start.attributes().next()
-                                            {
-                                                // SAFETY: document is known valid utf8
-                                                font.font = unsafe {
-                                                    CompactString::from_utf8_unchecked(val)
-                                                };
-                                            }
-                                        }
-                                    }
-                                    Event::End(ref end) if end.local_name().as_ref() == b"b" => {
-                                        continue;
-                                    }
-                                    Event::End(ref end) if end.local_name().as_ref() == b"font" => {
-                                        break;
-                                    }
-                                    _ => {
-                                        continue;
-                                    }
+                                    // TODO: alignment and protection elements
+
+                                    styles.cells_xfs.add(xf);
+                                }
+                                Event::End(end) if end.local_name().as_ref() == b"cellXfs" => break,
+                                _ => {
+                                    continue;
                                 }
                             }
                         }
-                        fonts.push(font.clone());
+                    }
+                }
+                Event::Start(ref start) if start.local_name().as_ref() == b"indexedColors" => {
+                    // <indexedColors>
+                    loop {
+                        buf_2.clear();
+                        if let Ok(event) = reader.read_event_into(&mut buf_2) {
+                            match event {
+                                Event::Start(start)
+                                    if start.local_name().as_ref() == b"rgbColor" =>
+                                {
+                                    //   <rgbColor rgb="FF000000" />
+                                    //   <rgbColor rgb="FFEDEDED" />
+
+                                    if let Some(Ok(Attribute {
+                                        key: QName(b"rgb"),
+                                        value: rgb,
+                                    })) = start.attributes().next()
+                                    {
+                                        styles.indexed_colors.add(RgbColor {
+                                            rgb: unsafe {
+                                                // SAFETY: document is known utf-8
+                                                CompactString::from_utf8_unchecked(&rgb)
+                                            },
+                                        });
+                                    }
+                                }
+                                Event::End(end)
+                                    if end.local_name().as_ref() == b"indexedColors" =>
+                                {
+                                    // Parsed all `rgbColor` elements
+                                    break;
+                                }
+                                _ => continue,
+                            }
+                        }
                     }
                 }
                 Event::Eof => break,
@@ -235,24 +513,195 @@ pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<
         }
     }
 
-    Ok(fonts)
+    debug_assert_eq!(styles.fonts.fonts.len(), styles.fonts.count as usize);
+    debug_assert_eq!(styles.cells_xfs.xfs.len(), styles.cells_xfs.count as usize);
+
+    Ok(styles)
 }
 
-pub(super) fn relationships<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Vec<CompactString> {
+#[derive(Debug, Default)]
+pub(super) struct Styles {
+    fonts: Fonts,
+    cells_xfs: CellXfs,
+    indexed_colors: IndexedColors,
+}
+
+impl Styles {
+    // PERF: Lots of cloning. Even if they are only copy, thats a lot of operations.
+    // The challenge is that cannot move value out as other cells might need the same data.
+    fn font(&self, index: usize) -> crate::wip::style::Font {
+        // dbg!(index);
+        let cell_xfs = &self.cells_xfs.xfs[index];
+
+        // dbg!(&cell_xfs);
+
+        let font = &self.fonts.fonts[cell_xfs.font_id];
+
+        // dbg!(&font);
+
+        let color = font.color.as_ref().map_or_else(
+            || CompactString::new("FF000000"),
+            |some| match some {
+                Color::Argb(color) => color.clone(),
+                Color::Indexed(idx) => self
+                    .indexed_colors
+                    .rgb_colors
+                    .get(*idx)
+                    .map_or_else(|| CompactString::new("FF000000"), |some| some.rgb.clone()),
+                Color::Theme { .. } => CompactString::new("FF000000"),
+            },
+        );
+
+        crate::wip::style::Font {
+            name: font.name.clone(),
+            size: font.sz,
+            color,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Fonts {
+    fonts: Vec<Font>,
+    count: u32,
+}
+
+impl Fonts {
+    fn add(&mut self, font: Font) {
+        self.fonts.push(font);
+    }
+}
+
+// <font>
+//     <b val="true" />
+//     <sz val="17" />
+//     <color rgb="FF11806A" />
+//     <name val="Arial" />
+//     <family val="0" />
+//     <charset val="1" />
+// </font>
+#[derive(Debug, Default)]
+struct Font {
+    sz: f64,
+    color: Option<Color>,
+    name: CompactString,
+    family: u8,
+    charset: Option<u8>,
+    b: Option<bool>,
+}
+
+#[derive(Debug)]
+enum Color {
+    Argb(CompactString),
+    Indexed(usize),
+    Theme { theme: u32, tint: Option<f32> },
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Self::Argb(CompactString::new("FFFFFFF"))
+    }
+}
+
+#[derive(Debug, Default)]
+struct Fills {
+    fills: Vec<Fill>,
+    count: u32,
+}
+
+#[derive(Debug, Default)]
+struct Fill {
+    pattern_fill: CompactString,
+}
+
+// struct Borders {
+//     borders: Vec<Border>,
+//     count: u32,
+// }
+
+// struct Border {
+
+// }
+
+#[derive(Debug, Default)]
+struct CellStyleXfs {
+    xfs: Vec<Xf>,
+    count: u32,
+}
+
+#[derive(Debug, Default)]
+struct CellXfs {
+    xfs: Vec<Xf>,
+    count: u32,
+}
+
+impl CellXfs {
+    fn add(&mut self, xf: Xf) {
+        self.xfs.push(xf);
+    }
+}
+
+#[derive(Debug, Default)]
+struct Xf {
+    num_fmt_id: u32,
+    font_id: usize,
+    fill_id: u32,
+    border_id: u32,
+    xf_id: u32,
+    apply_font: bool,
+    apply_border: bool,
+    apply_alignment: bool,
+    apply_protection: bool,
+    alignment: Option<Alignment>,
+    protection: Option<Protection>,
+}
+
+#[derive(Debug, Default)]
+struct Alignment {
+    horizontal: CompactString,
+    vertical: CompactString,
+    text_rotation: u32,
+    wrap_text: bool,
+    indent: u32,
+    shrink_ro_fit: bool,
+}
+
+#[derive(Debug, Default)]
+struct Protection {
+    locked: bool,
+    hidden: bool,
+}
+
+#[derive(Debug, Default)]
+struct IndexedColors {
+    rgb_colors: Vec<RgbColor>,
+}
+
+impl IndexedColors {
+    fn add(&mut self, rgb_color: RgbColor) {
+        self.rgb_colors.push(rgb_color);
+    }
+}
+
+#[derive(Debug, Default)]
+struct RgbColor {
+    rgb: CompactString,
+}
+
+pub(super) fn _relationships<R: Read + Seek>(_archive: &mut ZipArchive<R>) -> Vec<CompactString> {
     todo!()
 }
 
-pub(super) fn workbook<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Vec<CompactString> {
+pub(super) fn _workbook<R: Read + Seek>(_archive: &mut ZipArchive<R>) -> Vec<CompactString> {
     todo!()
 }
 
-#[inline]
-pub(super) fn worksheet<R: Read + Seek>(
-    worksheet: &mut Worksheet,
+pub(super) fn _worksheet_nothing<'a, R: Read + Seek>(
+    worksheet: &mut Worksheet<'a>,
     archive: &mut ZipArchive<R>,
-    shared_strings: &[CompactString],
-    styles: &[Font],
-) -> Result<Option<()>, XlsxError> {
+    _shared_strings: &'a [CompactString],
+    _styles: &'a Styles,
+) -> Result<Option<()>, Error> {
     let file = match archive.by_name(&format!("xl/worksheets/{}.xml", worksheet.name)) {
         Ok(ok) => ok,
         Err(ZipError::FileNotFound) => return Ok(None),
@@ -268,12 +717,68 @@ pub(super) fn worksheet<R: Read + Seek>(
         .expand_empty_elements(true);
 
     let mut buffer: Vec<u8> = Vec::with_capacity(1024);
-    let mut cell_buffer: Vec<u8> = Vec::with_capacity(1024);
-    let mut value_buffer: Vec<u8> = Vec::with_capacity(1024);
 
     loop {
         if let Ok(event) = reader.read_event_into(&mut buffer) {
             match event {
+                Event::Eof => break,
+                _ => continue,
+            }
+        }
+    }
+
+    Ok(Some(()))
+}
+
+#[inline]
+#[allow(clippy::too_many_lines)]
+pub(super) fn worksheet<'a, R: Read + Seek>(
+    worksheet: &mut Worksheet<'a>,
+    archive: &mut ZipArchive<R>,
+    shared_strings: &'a [CompactString],
+    styles: &'a Styles,
+) -> Result<Option<()>, Error> {
+    let file = match archive.by_name(&format!("xl/worksheets/{}.xml", worksheet.name)) {
+        Ok(ok) => ok,
+        Err(ZipError::FileNotFound) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut reader = Reader::from_reader(BufReader::new(file));
+
+    reader
+        .check_end_names(false)
+        .trim_text(false)
+        .check_comments(false)
+        .expand_empty_elements(true);
+
+    let mut buf_1: Vec<u8> = Vec::with_capacity(1024);
+    let mut buf_2: Vec<u8> = Vec::with_capacity(1024);
+    let mut buf_3: Vec<u8> = Vec::with_capacity(1024);
+
+    let mut dimensions_are_known = false;
+
+    loop {
+        if let Ok(event) = reader.read_event_into(&mut buf_1) {
+            match event {
+                Event::Start(ref start) if start.local_name().as_ref() == b"dimension" => {
+                    if let Some(Ok(Attribute {
+                        key: QName(b"ref"),
+                        value: dimensions,
+                    })) = start.attributes().next()
+                    {
+                        let mut parts = dimensions.split(|char| *char == b':');
+
+                        let top_left =
+                            unsafe { excel_column_row_to_tuple_unchecked(parts.next().unwrap()) };
+                        let bottom_right =
+                            unsafe { excel_column_row_to_tuple_unchecked(parts.next().unwrap()) };
+
+                        worksheet.spreadsheet.resize(top_left, bottom_right);
+
+                        dimensions_are_known = true;
+                    }
+                }
                 Event::Start(ref start) if start.local_name().as_ref() == b"c" => {
                     let mut attributes = start.attributes();
 
@@ -281,6 +786,7 @@ pub(super) fn worksheet<R: Read + Seek>(
 
                     // Go through each attribute and take relevant data from them.
                     // Example: <c r="A1" s="5" t="s">
+                    // If no `t` then default to number
                     // Example:  <c r="E1" s="3">
 
                     if let Some(Ok(Attribute {
@@ -291,9 +797,8 @@ pub(super) fn worksheet<R: Read + Seek>(
                     })) = attributes.next()
                     {
                         // SAFETY: document is known valid utf8
-                        let position = unsafe { std::str::from_utf8_unchecked(pos) };
-
-                        let (column, row) = excel_column_row_to_tuple(position);
+                        // `r="A1"` getting the `A1` part
+                        let (column, row) = unsafe { excel_column_row_to_tuple_unchecked(pos) };
 
                         cell.column = column;
                         cell.row = row;
@@ -305,28 +810,13 @@ pub(super) fn worksheet<R: Read + Seek>(
                         value: ref style_idx,
                     })) = attributes.next()
                     {
-                        let idx: usize = unsafe {
-                            // SAFETY: document is known valid utf8
+                        let idx = unsafe {
                             std::str::from_utf8_unchecked(style_idx)
-                                .parse()
-                                .expect("should always be an integer")
+                                .parse::<usize>()
+                                .unwrap()
                         };
 
-                        // TODO: If one is not found, need to use the worksheet theme to default.
-                        // This will be passed in in the future.
-                        let font = match styles.get(idx) {
-                            Some(some) => some.clone(),
-                            None => {
-                                // TODO: will get style from base theme
-                                Font {
-                                    font: CompactString::new("Arial"),
-                                    size: 12.0,
-                                    color: CompactString::new("000000"),
-                                }
-                            }
-                        };
-
-                        cell.font = font;
+                        cell.font = Cow::Owned(styles.font(idx));
                     }
 
                     if let Some(Ok(Attribute {
@@ -341,9 +831,9 @@ pub(super) fn worksheet<R: Read + Seek>(
                                 cell.r#type = Some(Type::String);
                             }
                             // in-line string
-                            b"is" => {}
+                            b"is" => cell.r#type = Some(Type::String),
                             // formula
-                            b"f" => {}
+                            b"f" => cell.r#type = Some(Type::Formula),
                             // number
                             b"n" => {
                                 cell.r#type = Some(Type::Number);
@@ -355,34 +845,34 @@ pub(super) fn worksheet<R: Read + Seek>(
                         }
                     }
 
+                    // If there is no `t` attribute, then default to `Type::Number`
                     if cell.r#type.is_none() {
                         cell.r#type = Some(Type::Number);
                     }
 
                     // Get relevant value in cell
-                    cell_buffer.clear();
-                    if let Ok(Event::Start(start)) = reader.read_event_into(&mut cell_buffer) {
+                    buf_2.clear();
+                    if let Ok(Event::Start(start)) = reader.read_event_into(&mut buf_2) {
                         // Get the value of `<v>VALUE</v>` if it exists. If it doesnt, then the cell will have a vlue of `None`
                         if start.local_name().as_ref() == b"v" {
-                            if let Ok(Event::Text(text)) = reader.read_event_into(&mut value_buffer)
-                            {
+                            if let Ok(Event::Text(text)) = reader.read_event_into(&mut buf_3) {
                                 match cell
                                     .r#type
                                     .expect("must have a type if there is a value element found")
                                 {
                                     Type::Number => {
-                                        cell.value =
-                                            Some(CompactString::new(&text.unescape().unwrap()))
+                                        cell.value = Some(Cow::Owned(CompactString::new(
+                                            &text.unescape().unwrap(),
+                                        )));
                                     }
                                     Type::String => {
-                                        let idx: usize = unsafe {
-                                            // SAFETY: document is known valid utf8
-                                            std::str::from_utf8_unchecked(&text).parse().expect(
-                                                "should be integer to index into shared strings",
-                                            )
+                                        let idx = unsafe {
+                                            std::str::from_utf8_unchecked(&text)
+                                                .parse::<usize>()
+                                                .unwrap()
                                         };
 
-                                        cell.value = Some(shared_strings[idx].clone());
+                                        cell.value = Some(Cow::Borrowed(&shared_strings[idx]));
                                     }
                                     Type::Formula => todo!(),
                                 };
@@ -390,7 +880,11 @@ pub(super) fn worksheet<R: Read + Seek>(
                         }
                     }
 
-                    worksheet.spreadsheet.insert(cell);
+                    if dimensions_are_known {
+                        worksheet.spreadsheet.insert_exact(cell);
+                    } else {
+                        worksheet.spreadsheet.insert(cell);
+                    }
                 }
                 Event::End(ref end) if end.local_name().as_ref() == b"sheetData" => {
                     break;
@@ -406,23 +900,24 @@ pub(super) fn worksheet<R: Read + Seek>(
     Ok(Some(()))
 }
 
-/// # Panics
+/// # Safety
 ///
-/// Will panic if column format is not `a-z` or `A-Z`, or if there is no row number after the column letter/s.
-#[inline]
-fn excel_column_row_to_tuple(pos: &str) -> (u32, u32) {
+/// Must only pass in valid ascii `A-Z` columns and `0-9` rows.
+unsafe fn excel_column_row_to_tuple_unchecked(pos: &[u8]) -> (u32, u32) {
     let mut idx = 0;
 
-    for char in pos.chars() {
-        if char.is_ascii_alphabetic() {
+    for char in pos {
+        if *char > 64 {
             idx += 1;
             continue;
         }
         break;
     }
 
-    let column = excel_column_to_number(&pos[..idx]);
-    let row: u32 = pos[idx..].parse().unwrap();
+    let column = excel_column_to_number_unchecked(&pos[..idx]);
+    let row = std::str::from_utf8_unchecked(&pos[idx..])
+        .parse::<u32>()
+        .unwrap();
 
     // zero based position
     (column - 1, row - 1)
@@ -430,59 +925,39 @@ fn excel_column_row_to_tuple(pos: &str) -> (u32, u32) {
 
 /// # Panics
 ///
-/// Will panic if the provided string contains a letter other than `a-z` or `A-Z`.
-#[inline]
-fn excel_column_to_number(column: &str) -> u32 {
-    let column = to_uppercase_compact_str(column);
+/// Will panic if the provided string contains a letter other than `A-Z`.
+unsafe fn excel_column_to_number_unchecked(column: &[u8]) -> u32 {
     let mut result = 0;
     let mut multiplier = 1;
 
-    for char in column.chars().rev() {
-        if char.is_ascii_alphabetic() {
-            let digit = char as u32 - 'A' as u32 + 1;
-            result += digit * multiplier;
-            multiplier *= 26;
-        } else {
-            // break;
-            // If the string contains non-alphabetic characters panic
-            panic!("`{char}` is not a valid column letter must be `A-Z`")
-        }
+    for char in column.iter().rev() {
+        let digit = u32::from(*char) - 'A' as u32 + 1;
+        result += digit * multiplier;
+        multiplier *= 26;
     }
 
     result
 }
 
-#[inline]
-fn to_uppercase_compact_str(string: &str) -> CompactString {
-    // NOTE: maximum number of columns is 16,384 or `XFD`
-    assert!(string.len() < 4);
-    let len = string.len();
-
-    let mut char_array: [u8; 3] = [0; 3];
-
-    for (idx, char) in string.chars().enumerate() {
-        char_array[idx] = char.to_ascii_uppercase() as u8;
-    }
-
-    // SAFETY: Input is a `&str` and `to_ascii_uppercase` returns a valid ascii.
-    unsafe { CompactString::from_utf8_unchecked(&char_array[..len]) }
-}
-
 #[cfg(test)]
 mod test {
+
     use super::*;
+
+    // extern crate test;
+    // use test::{black_box, Bencher};
 
     #[test]
     fn should_convert_excel_letter_number_format_to_tuple() {
-        let result = excel_column_row_to_tuple("A1");
+        let result = unsafe { excel_column_row_to_tuple_unchecked(b"A1") };
 
         assert_eq!((0, 0), result);
 
-        let result = excel_column_row_to_tuple("A2");
+        let result = unsafe { excel_column_row_to_tuple_unchecked(b"A2") };
 
         assert_eq!((0, 1), result);
 
-        let result = excel_column_row_to_tuple("B1");
+        let result = unsafe { excel_column_row_to_tuple_unchecked(b"B1") };
 
         assert_eq!((1, 0), result);
     }

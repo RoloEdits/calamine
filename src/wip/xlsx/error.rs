@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum XlsxError {
+pub enum Error {
     #[error("failed to read file {0}")]
     ReadFailure(#[from] std::io::Error),
     #[error("failed to open zip archive from path: {0}")]
