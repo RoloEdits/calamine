@@ -1,4 +1,5 @@
 pub mod xlsx;
+use quick_xml::Reader;
 pub use xlsx::{Error, Xlsx};
 mod cell;
 mod spreadsheet;
@@ -8,10 +9,11 @@ use cell::Cell;
 use compact_str::CompactString;
 use core::panic;
 use spreadsheet::Spreadsheet;
-use std::path::Path;
+use std::{io::BufReader, path::Path};
 use style::Font;
+use zip::read::ZipFile;
 
-use self::spreadsheet::{Column, Rows};
+use self::spreadsheet::{Column, Rows, RowsLazy};
 
 // Here so that there is a cleaner API.
 // Rather than having the logic fall to the user of library, matching on an exstention
@@ -39,10 +41,16 @@ impl<'a> Workbook<'a> {
         Ok(workbook)
     }
 
+    pub fn worksheets(&'a mut self) -> &mut [Worksheet] {
+        match self {
+            Workbook::Xlsx(xlsx) => xlsx.worksheets(),
+        }
+    }
+
     pub fn worksheet(
         &'a mut self,
         worksheet: impl AsRef<str>,
-    ) -> Result<Option<&Worksheet>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<&mut Worksheet>, Box<dyn std::error::Error>> {
         let worksheet = match self {
             Workbook::Xlsx(xlsx) => xlsx.worksheet(worksheet)?,
         };
@@ -81,9 +89,9 @@ trait WorkbookImpl<'a> {
     fn worksheet(
         &'a mut self,
         worksheet: impl AsRef<str>,
-    ) -> Result<Option<&Worksheet>, Self::Error>;
+    ) -> Result<Option<&mut Worksheet>, Self::Error>;
 
-    fn worksheets(&self) -> &[Worksheet];
+    fn worksheets(&'a mut self) -> &mut [Worksheet];
 
     // fn worksheets_mut(&mut self) -> &mut [Worksheet];
 
@@ -117,8 +125,6 @@ pub struct Worksheet<'a> {
 }
 
 impl<'a> Worksheet<'a> {
-    #[inline]
-    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -127,13 +133,15 @@ impl<'a> Worksheet<'a> {
     //     todo!()
     // }
 
-    #[inline]
-    #[must_use]
     pub fn rows(&self) -> Rows<'_> {
         Rows {
             spreadsheet: &self.spreadsheet,
             row: 0,
         }
+    }
+
+    pub fn rows_lazy(&mut self) -> RowsLazy<'_> {
+        todo!()
     }
 
     // #[inline]
