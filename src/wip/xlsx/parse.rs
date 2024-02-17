@@ -30,70 +30,40 @@ pub(super) fn shared_strings<R: Read + Seek>(
     let mut inner_inner_buffer: Vec<u8> = Vec::with_capacity(1024);
 
     let mut strings: Vec<CompactString> = Vec::new();
-    // let mut rich_buffer: Option<CompactString> = None;
-    let mut is_phonetic_text = false;
 
     loop {
-        if let Ok(event) = reader.read_event_into(&mut buffer) {
-            match event {
-                Event::Start(ref start) if start.local_name().as_ref() == b"si" => {
-                    if let Ok(inner_event) = reader.read_event_into(&mut inner_buffer) {
-                        match inner_event {
-                            // Event::Start(ref e) if e.local_name().as_ref() == b"r" => {
-                            //     if rich_buffer.is_none() {
-                            //         // use a buffer since richtext has multiples <r> and <t> for the same cell
-                            //         rich_buffer = CompactString::default();
-                            //     }
-                            // }
-                            Event::Start(ref e) if e.local_name().as_ref() == b"rPh" => {
-                                is_phonetic_text = true;
-                            }
-                            // Event::End(ref e)
-                            //     if e.local_name().as_ref() == start.local_name().as_ref() =>
-                            // {
-                            //     strings.push(rich_buffer);
-                            // }
-                            Event::End(ref e) if e.local_name().as_ref() == b"rPh" => {
-                                is_phonetic_text = false;
-                            }
-                            Event::Start(ref e)
-                                if e.local_name().as_ref() == b"t" && !is_phonetic_text =>
-                            {
-                                inner_inner_buffer.clear();
-
-                                loop {
-                                    match reader.read_event_into(&mut inner_inner_buffer).unwrap() {
-                                        Event::Text(t) => {
-                                            strings
-                                                .push(CompactString::new(&t.unescape().unwrap()));
-                                        }
-                                        Event::End(end) if end.name() == e.name() => break,
-                                        Event::Eof => return Err(Error::XmlEof("t")),
-                                        _ => (),
-                                    }
+        buffer.clear();
+        match &reader.read_event_into(&mut buffer)? {
+            Event::Start(si) if si.local_name().as_ref() == b"si" => loop {
+                inner_buffer.clear();
+                if let Ok(si_inner) = reader.read_event_into(&mut inner_buffer) {
+                    match &si_inner {
+                        Event::Start(event) if event.local_name().as_ref() == b"t" => {
+                            inner_inner_buffer.clear();
+                            match reader.read_event_into(&mut inner_inner_buffer).unwrap() {
+                                Event::Text(text) => {
+                                    strings.push(CompactString::new(
+                                        &text
+                                            .unescape()
+                                            .expect("text in `t` element should be valid"),
+                                    ));
                                 }
-
-                                // if let Some(ref mut s) = rich_buffer {
-                                //     s.push_str(&value);
-                                // } else {
-                                //     inner_buffer.clear();
-                                //     // consume any remaining events up to expected closing tag
-                                //     reader
-                                //         .read_to_end_into(start.name(), &mut inner_buffer)
-                                //         .unwrap();
-                                //     // return Ok(Some(value));
-                                // }
+                                _ => continue,
                             }
-                            _ => {}
                         }
+                        // TODO: other tags in inner `si` will go here
+
+                        // Reached end of inner `si` tag and can go on to the next one
+                        Event::End(end) if end.local_name().as_ref() == b"si" => break,
+
+                        // INFO: there should only be `Event:End` here for all the prior matches, like `t` etc.
+                        _ => continue,
                     }
                 }
-                Event::Eof => break,
-                _ => {}
-            }
+            },
+            Event::Eof => break,
+            _ => continue,
         }
-
-        buffer.clear();
     }
 
     Ok(strings)
