@@ -13,7 +13,7 @@ use std::{io::BufReader, path::Path};
 use style::Font;
 use zip::read::ZipFile;
 
-use self::spreadsheet::{Column, Rows, RowsLazy};
+use self::spreadsheet::{Column, Rows};
 
 // Here so that there is a cleaner API.
 // Rather than having the logic fall to the user of library, matching on an exstention
@@ -138,10 +138,6 @@ impl<'a> Worksheet<'a> {
             spreadsheet: &self.spreadsheet,
             row: 0,
         }
-    }
-
-    pub fn rows_lazy(&mut self) -> RowsLazy<'_> {
-        todo!()
     }
 
     // #[inline]
