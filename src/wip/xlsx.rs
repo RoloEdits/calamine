@@ -66,11 +66,11 @@ const MAX_DATE: i64 = 253_402_329_599;
 
 pub struct Xlsx<'a> {
     archive: ZipArchive<BufReader<File>>,
-    theme: Vec<CompactString>,
-    relationships: Vec<CompactString>,
-    styles: Styles,
-    shared_strings: Vec<CompactString>,
     worksheets: Vec<Worksheet<'a>>,
+    shared_strings: Vec<CompactString>,
+    theme: Vec<CompactString>,
+    styles: Styles,
+    relationships: Vec<CompactString>,
 }
 
 impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
@@ -81,56 +81,34 @@ impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
         let file = BufReader::new(File::open(path)?);
         let mut archive = ZipArchive::new(file)?;
 
-        let shared_strings = parse::shared_strings(&mut archive)?;
-
         let styles = parse::styles(&mut archive)?;
-
-        // println!("styles = {styles:#?}");
-        // for (idx, style) in styles.fonts.iter().enumerate() {
-        //     println!("styles[{}] = `{}`", idx + 1, style.color());
-        // }
-
-        // let relationships = parse::relationships(&mut archive);
-
-        let mut worksheets = Vec::new();
-
-        // Gets names of worksheets
-        // for worksheet in parse::relationships(&mut archive) {
-        //     worksheets.push(Worksheet {
-        //         name: worksheet,
-        //         spreadsheet: Spreadsheet::new(),
-        //     })
-        // }
-
-        // TEMP:
-        worksheets.push(Worksheet {
-            name: CompactString::new("sheet1"),
-            spreadsheet: Spreadsheet::new(),
-        });
+        let shared_strings = parse::shared_strings(&mut archive)?;
+        let worksheets = parse::workbook(&mut archive)?;
 
         Ok(Xlsx {
             archive,
-            theme: Vec::new(),
-            relationships: Vec::new(),
-            styles,
-            shared_strings,
             worksheets,
+            shared_strings,
+            theme: Vec::new(),
+            styles,
+            relationships: Vec::new(),
         })
     }
 
     fn worksheet(
         &'a mut self,
         worksheet: impl AsRef<str>,
-    ) -> Result<Option<&Worksheet>, Self::Error> {
+    ) -> Result<Option<&mut Worksheet>, Self::Error> {
         for __worksheet in &mut self.worksheets {
-            if __worksheet.name == worksheet.as_ref().to_lowercase() {
-                if let Ok(Some(())) = parse::worksheet(
+            if __worksheet.name == worksheet.as_ref() {
+                match parse::worksheet(
                     __worksheet,
                     &mut self.archive,
                     &self.shared_strings,
                     &self.styles,
-                ) {
-                    return Ok(Some(__worksheet));
+                )? {
+                    Some(()) => return Ok(Some(__worksheet)),
+                    None => return Ok(None),
                 };
             }
         }
@@ -138,8 +116,8 @@ impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
         Ok(None)
     }
 
-    fn worksheets(&self) -> &[Worksheet] {
-        &self.worksheets
+    fn worksheets(&'a mut self) -> &mut [Worksheet] {
+        &mut self.worksheets
     }
 
     fn add_worksheet<'w: 'a>(
