@@ -8,12 +8,13 @@ use quick_xml::{
 };
 use std::{
     borrow::Cow,
+    fs::File,
     io::{BufReader, Read, Seek},
 };
 use zip::{result::ZipError, ZipArchive};
 
-pub(super) fn workbook<'a, R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+pub(super) fn workbook<'a>(
+    archive: &mut ZipArchive<BufReader<File>>,
 ) -> Result<Vec<Worksheet<'a>>, Error> {
     let file = archive.by_name("xl/workbook.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
@@ -38,7 +39,7 @@ pub(super) fn workbook<'a, R: Read + Seek>(
                     .attributes()
                     .next()
                     .expect(r#"<sheet name="NAME"> should be first attribute"#)
-                    .expect("");
+                    .expect("attribute iter is infallible");
 
                 // SAFETY: document should be valid UTF-8
                 let name = unsafe { CompactString::from_utf8_unchecked(&name.value) };
@@ -56,8 +57,8 @@ pub(super) fn workbook<'a, R: Read + Seek>(
     Ok(worksheets)
 }
 #[inline]
-pub(super) fn shared_strings<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+pub(super) fn shared_strings(
+    archive: &mut ZipArchive<BufReader<File>>,
 ) -> Result<Vec<CompactString>, Error> {
     let file = archive.by_name("xl/sharedStrings.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
@@ -115,8 +116,8 @@ pub(super) fn shared_strings<R: Read + Seek>(
 }
 
 #[inline]
-pub(super) fn _theme<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+pub(super) fn _theme(
+    archive: &mut ZipArchive<BufReader<File>>,
 ) -> Result<Vec<CompactString>, Error> {
     let file = archive.by_name("xl/theme/theme1.xml").unwrap();
     let mut reader = Reader::from_reader(BufReader::new(file));
@@ -132,7 +133,7 @@ pub(super) fn _theme<R: Read + Seek>(
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 #[inline]
-pub(super) fn styles<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Styles, Error> {
+pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles, Error> {
     let file = archive.by_name("xl/styles.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
@@ -703,17 +704,17 @@ struct RgbColor {
     rgb: CompactString,
 }
 
-pub(super) fn _relationships<R: Read + Seek>(_archive: &mut ZipArchive<R>) -> Vec<CompactString> {
+pub(super) fn _relationships(_archive: &mut ZipArchive<BufReader<File>>) -> Vec<CompactString> {
     todo!()
 }
 
-pub(super) fn _workbook<R: Read + Seek>(_archive: &mut ZipArchive<R>) -> Vec<CompactString> {
+pub(super) fn _workbook(_archive: &mut ZipArchive<BufReader<File>>) -> Vec<CompactString> {
     todo!()
 }
 
-pub(super) fn _worksheet_nothing<'a, R: Read + Seek>(
+pub(super) fn _worksheet_nothing<'a>(
     worksheet: &mut Worksheet<'a>,
-    archive: &mut ZipArchive<R>,
+    archive: &mut ZipArchive<BufReader<File>>,
     _shared_strings: &'a [CompactString],
     _styles: &'a Styles,
 ) -> Result<Option<()>, Error> {
@@ -747,9 +748,9 @@ pub(super) fn _worksheet_nothing<'a, R: Read + Seek>(
 
 #[inline]
 #[allow(clippy::too_many_lines)]
-pub(super) fn worksheet<'a, R: Read + Seek>(
+pub(super) fn worksheet<'a>(
     worksheet: &mut Worksheet<'a>,
-    archive: &mut ZipArchive<R>,
+    archive: &mut ZipArchive<BufReader<File>>,
     shared_strings: &'a [CompactString],
     styles: &'a Styles,
 ) -> Result<Option<()>, Error> {
