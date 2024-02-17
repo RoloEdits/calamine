@@ -8,12 +8,8 @@ pub enum Error {
     ArchiveFailure(#[from] zip::result::ZipError),
     #[error("end of file error `{0}`")]
     XmlEof(&'static str),
-    #[error("end of file error `{0}`")]
+    #[error("failed to parse number `{0}`")]
     NumberParseError(#[from] std::num::ParseIntError),
-}
-
-#[derive(Debug, Error)]
-pub enum ParseError {
-    #[error("invalid xml {0}")]
-    InvalidXML(String),
+    #[error("xml parsng error `{0}`")]
+    XmlParsingError(#[from] quick_xml::Error),
 }
