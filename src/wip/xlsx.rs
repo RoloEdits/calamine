@@ -97,17 +97,17 @@ impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
 
     fn worksheet(
         &'a mut self,
-        worksheet: impl AsRef<str>,
+        name: impl AsRef<str>,
     ) -> Result<Option<&mut Worksheet>, Self::Error> {
-        for __worksheet in &mut self.worksheets {
-            if __worksheet.name == worksheet.as_ref() {
+        for worksheet in &mut self.worksheets {
+            if worksheet.name == name.as_ref() {
                 match parse::worksheet(
-                    __worksheet,
+                    worksheet,
                     &mut self.archive,
                     &self.shared_strings,
                     &self.styles,
                 )? {
-                    Some(()) => return Ok(Some(__worksheet)),
+                    Some(()) => return Ok(Some(worksheet)),
                     None => return Ok(None),
                 };
             }
