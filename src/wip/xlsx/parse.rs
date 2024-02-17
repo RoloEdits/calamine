@@ -23,6 +23,8 @@ pub(super) fn shared_strings<R: Read + Seek>(
         .check_end_names(false)
         .trim_text(false)
         .check_comments(false)
+        // PERF: Can just work with `Event::Empty` and so remove an allocation
+        // Its also more explicit for the structure of the document
         .expand_empty_elements(true);
 
     let mut buffer: Vec<u8> = Vec::with_capacity(1024);
@@ -708,7 +710,11 @@ pub(super) fn worksheet<'a, R: Read + Seek>(
     shared_strings: &'a [CompactString],
     styles: &'a Styles,
 ) -> Result<Option<()>, Error> {
-    let file = match archive.by_name(&format!("xl/worksheets/{}.xml", worksheet.name)) {
+    let file = match archive.by_name(&format!(
+        "xl/worksheets/{}.xml",
+        // NOTE: files are stored with lowercase names?
+        worksheet.name.to_lowercase()
+    )) {
         Ok(ok) => ok,
         Err(ZipError::FileNotFound) => return Ok(None),
         Err(err) => return Err(err.into()),
