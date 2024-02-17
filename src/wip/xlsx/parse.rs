@@ -1,4 +1,4 @@
-use crate::wip::{cell::Type, Cell, Error, Worksheet};
+use crate::wip::{cell::Type, spreadsheet::Spreadsheet, Cell, Error, Worksheet};
 use compact_str::CompactString;
 use core::panic;
 use quick_xml::{
@@ -12,6 +12,49 @@ use std::{
 };
 use zip::{result::ZipError, ZipArchive};
 
+pub(super) fn workbook<'a, R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<Worksheet<'a>>, Error> {
+    let file = archive.by_name("xl/workbook.xml")?;
+    let mut reader = Reader::from_reader(BufReader::new(file));
+
+    reader
+        .check_end_names(false)
+        .trim_text(false)
+        .check_comments(false)
+        .expand_empty_elements(true);
+
+    let mut buffer: Vec<u8> = Vec::with_capacity(1024);
+
+    let mut worksheets = Vec::new();
+
+    // <sheets>
+    //     <sheet name="Sheet1" sheetId="1" state="visible" r:id="rId3" />
+    // </sheets>
+    loop {
+        match &reader.read_event_into(&mut buffer)? {
+            Event::Start(start) if start.local_name().as_ref() == b"sheet" => {
+                let name = &start
+                    .attributes()
+                    .next()
+                    .expect(r#"<sheet name="NAME"> should be first attribute"#)
+                    .expect("");
+
+                // SAFETY: document should be valid UTF-8
+                let name = unsafe { CompactString::from_utf8_unchecked(&name.value) };
+                let spreadsheet = Spreadsheet::new();
+
+                let worksheet = Worksheet { name, spreadsheet };
+
+                worksheets.push(worksheet);
+            }
+            Event::End(end) if end.local_name().as_ref() == b"sheets" => break,
+            _ => continue,
+        }
+    }
+
+    Ok(worksheets)
+}
 #[inline]
 pub(super) fn shared_strings<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
