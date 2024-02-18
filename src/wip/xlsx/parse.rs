@@ -6,24 +6,17 @@ use quick_xml::{
     name::QName,
     Reader,
 };
-use std::{
-    borrow::Cow,
-    fs::File,
-    io::{BufReader, Read, Seek},
-};
+use std::{borrow::Cow, fs::File, io::BufReader};
 use zip::{result::ZipError, ZipArchive};
 
+#[inline]
 pub(super) fn workbook<'a>(
     archive: &mut ZipArchive<BufReader<File>>,
 ) -> Result<Vec<Worksheet<'a>>, Error> {
     let file = archive.by_name("xl/workbook.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader
-        .check_end_names(false)
-        .trim_text(false)
-        .check_comments(false)
-        .expand_empty_elements(true);
+    reader.check_end_names(false);
 
     let mut buffer: Vec<u8> = Vec::with_capacity(1024);
 
@@ -34,18 +27,36 @@ pub(super) fn workbook<'a>(
     // </sheets>
     loop {
         match &reader.read_event_into(&mut buffer)? {
-            Event::Start(start) if start.local_name().as_ref() == b"sheet" => {
-                let name = &start
-                    .attributes()
+            Event::Empty(sheet) if sheet.local_name().as_ref() == b"sheet" => {
+                let mut attributes = sheet.attributes();
+
+                let name = &attributes
                     .next()
                     .expect(r#"<sheet name="NAME"> should be first attribute"#)
                     .expect("attribute iter is infallible");
 
                 // SAFETY: document should be valid UTF-8
                 let name = unsafe { CompactString::from_utf8_unchecked(&name.value) };
+
+                let id = &attributes
+                    .next()
+                    .expect(r#"<sheet name="NAME"> should be first attribute"#)
+                    .expect("attribute iter is infallible");
+
+                // SAFETY: document should be valid UTF-8
+                let id = unsafe {
+                    CompactString::from_utf8_unchecked(&id.value)
+                        .parse::<u32>()
+                        .expect("`sheetId` should always be parsable into a `u32`")
+                };
+
                 let spreadsheet = Spreadsheet::new();
 
-                let worksheet = Worksheet { name, spreadsheet };
+                let worksheet = Worksheet {
+                    id,
+                    name,
+                    spreadsheet,
+                };
 
                 worksheets.push(worksheet);
             }
@@ -56,6 +67,7 @@ pub(super) fn workbook<'a>(
 
     Ok(worksheets)
 }
+
 #[inline]
 pub(super) fn shared_strings(
     archive: &mut ZipArchive<BufReader<File>>,
@@ -63,13 +75,7 @@ pub(super) fn shared_strings(
     let file = archive.by_name("xl/sharedStrings.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader
-        .check_end_names(false)
-        .trim_text(false)
-        .check_comments(false)
-        // PERF: Can just work with `Event::Empty` and so remove an allocation
-        // Its also more explicit for the structure of the document
-        .expand_empty_elements(true);
+    reader.check_end_names(false);
 
     let mut buffer: Vec<u8> = Vec::with_capacity(1024);
     let mut inner_buffer: Vec<u8> = Vec::with_capacity(1024);
@@ -102,7 +108,6 @@ pub(super) fn shared_strings(
                         // Reached end of inner `si` tag and can go on to the next one
                         Event::End(end) if end.local_name().as_ref() == b"si" => break,
 
-                        // INFO: there should only be `Event:End` here for all the prior matches, like `t` etc.
                         _ => continue,
                     }
                 }
@@ -122,11 +127,7 @@ pub(super) fn _theme(
     let file = archive.by_name("xl/theme/theme1.xml").unwrap();
     let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader
-        .check_end_names(false)
-        .trim_text(false)
-        .check_comments(false)
-        .expand_empty_elements(true);
+    reader.check_end_names(false);
 
     todo!()
 }
@@ -137,11 +138,7 @@ pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles
     let file = archive.by_name("xl/styles.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader
-        .check_end_names(false)
-        .trim_text(false)
-        .check_comments(false)
-        .expand_empty_elements(true);
+    reader.check_end_names(false);
 
     let mut buf_1 = Vec::with_capacity(1024);
     let mut buf_2 = Vec::with_capacity(1024);
@@ -186,7 +183,7 @@ pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles
                                         buf_3.clear();
                                         if let Ok(event) = reader.read_event_into(&mut buf_3) {
                                             match event {
-                                                Event::Start(ref start)
+                                                Event::Empty(ref start)
                                                     if start.local_name().as_ref() == b"sz" =>
                                                 {
                                                     if let Some(Ok(Attribute {
@@ -202,7 +199,7 @@ pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles
                                                         };
                                                     }
                                                 }
-                                                Event::Start(ref start)
+                                                Event::Empty(ref start)
                                                     if start.local_name().as_ref() == b"color" =>
                                                 {
                                                     if let Some(Ok(Attribute {
@@ -260,7 +257,7 @@ pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles
                                                         font.color = Some(Color::Indexed(idx));
                                                     }
                                                 }
-                                                Event::Start(ref start)
+                                                Event::Empty(ref start)
                                                     if start.local_name().as_ref() == b"name" =>
                                                 {
                                                     if let Some(Ok(Attribute {
@@ -328,150 +325,156 @@ pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles
                                     let mut xf = Xf::default();
 
                                     for attribute in start.attributes() {
+                                        let attribute =
+                                            attribute.expect("attribute iter should be infallible");
+
                                         match attribute {
-                                            Err(err) => panic!("{:?}", err),
-                                            Ok(ok) => {
-                                                match ok {
-                                                    Attribute {
-                                                        key: QName(b"numFmtId"),
-                                                        value: val,
-                                                    } => {
-                                                        xf.num_fmt_id = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                                .parse::<u32>()?
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"fontId"),
-                                                        value: val,
-                                                    } => {
-                                                        xf.font_id = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                                .parse::<usize>()?
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"fillId"),
-                                                        value: val,
-                                                    } => {
-                                                        xf.fill_id = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                                .parse::<u32>()?
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"borderId"),
-                                                        value: val,
-                                                    } => {
-                                                        xf.border_id = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                                .parse::<u32>()?
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"xfId"),
-                                                        value: val,
-                                                    } => {
-                                                        xf.xf_id = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                                .parse::<u32>()?
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"applyFont"),
-                                                        value: val,
-                                                    } => {
-                                                        let str = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                        };
-
-                                                        // NOTE: can be "1" or "0"
-                                                        xf.apply_font = if str.len() == 1 {
-                                                            let int = str.parse::<u8>().unwrap();
-
-                                                            matches!(int, 1)
-                                                        } else {
-                                                            str.parse::<bool>()
-                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"applyBorder"),
-                                                        value: val,
-                                                    } => {
-                                                        let str = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                        };
-
-                                                        // NOTE: can be "1" or "0"
-                                                        xf.apply_border = if str.len() == 1 {
-                                                            let int = str.parse::<u8>().unwrap();
-
-                                                            matches!(int, 1)
-                                                        } else {
-                                                            str.parse::<bool>()
-                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"applyAlignment"),
-                                                        value: val,
-                                                    } => {
-                                                        let str = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                        };
-
-                                                        // NOTE: can be "1" or "0"
-                                                        xf.apply_alignment = if str.len() == 1 {
-                                                            let int = str.parse::<u8>().unwrap();
-
-                                                            matches!(int, 1)
-                                                        } else {
-                                                            str.parse::<bool>()
-                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
-                                                        };
-                                                    }
-
-                                                    Attribute {
-                                                        key: QName(b"applyProtection"),
-                                                        value: val,
-                                                    } => {
-                                                        let str = unsafe {
-                                                            // SAFETY: document is known utf-8
-                                                            std::str::from_utf8_unchecked(&val)
-                                                        };
-
-                                                        // NOTE: can be "1" or "0"
-                                                        xf.apply_protection = if str.len() == 1 {
-                                                            let int = str.parse::<u8>().unwrap();
-
-                                                            matches!(int, 1)
-                                                        } else {
-                                                            str.parse::<bool>()
-                                                            .unwrap_or_else(|_| panic!("should be `true` or `false`, got `{str}`"))
-                                                        };
-                                                    }
-
-                                                    _ => unreachable!(
-                                                        "unknown attribute found on `xf` element"
-                                                    ),
-                                                }
+                                            Attribute {
+                                                key: QName(b"numFmtId"),
+                                                value: val,
+                                            } => {
+                                                xf.num_fmt_id = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                        .parse::<u32>()?
+                                                };
                                             }
+
+                                            Attribute {
+                                                key: QName(b"fontId"),
+                                                value: val,
+                                            } => {
+                                                xf.font_id = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                        .parse::<usize>()?
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"fillId"),
+                                                value: val,
+                                            } => {
+                                                xf.fill_id = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                        .parse::<u32>()?
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"borderId"),
+                                                value: val,
+                                            } => {
+                                                xf.border_id = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                        .parse::<u32>()?
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"xfId"),
+                                                value: val,
+                                            } => {
+                                                xf.xf_id = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                        .parse::<u32>()?
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"applyFont"),
+                                                value: val,
+                                            } => {
+                                                let str = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                };
+
+                                                // NOTE: can be "1" or "0"
+                                                xf.apply_font = if str.len() == 1 {
+                                                    let int = str.parse::<u8>().unwrap();
+
+                                                    matches!(int, 1)
+                                                } else {
+                                                    str.parse()
+                                                        .unwrap_or_else(|err| {
+                                                            panic!("should be `true` or `false`, got `{str}`: {err}")
+                                                        })
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"applyBorder"),
+                                                value: val,
+                                            } => {
+                                                let str = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                };
+
+                                                // NOTE: can be "1" or "0"
+                                                xf.apply_border = if str.len() == 1 {
+                                                    let int = str.parse::<u8>().unwrap();
+
+                                                    matches!(int, 1)
+                                                } else {
+                                                    str.parse()
+                                                        .unwrap_or_else(|err| {
+                                                            panic!("should be `true` or `false`, got `{str}`: {err}")
+                                                        })
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"applyAlignment"),
+                                                value: val,
+                                            } => {
+                                                let str = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                };
+
+                                                // NOTE: can be "1" or "0"
+                                                xf.apply_alignment = if str.len() == 1 {
+                                                    let int = str.parse::<u8>().unwrap();
+
+                                                    matches!(int, 1)
+                                                } else {
+                                                    str.parse()
+                                                        .unwrap_or_else(|err| {
+                                                            panic!("should be `true` or `false`, got `{str}`: {err}")
+                                                        })
+                                                };
+                                            }
+
+                                            Attribute {
+                                                key: QName(b"applyProtection"),
+                                                value: val,
+                                            } => {
+                                                let str = unsafe {
+                                                    // SAFETY: document is known utf-8
+                                                    std::str::from_utf8_unchecked(&val)
+                                                };
+
+                                                // NOTE: can be "1" or "0"
+                                                xf.apply_protection = if str.len() == 1 {
+                                                    let int = str.parse::<u8>().unwrap();
+
+                                                    matches!(int, 1)
+                                                } else {
+                                                    str.parse()
+                                                        .unwrap_or_else(|err| {
+                                                            panic!("should be `true` or `false`, got `{str}`: {err}")
+                                                        })
+                                                };
+                                            }
+
+                                            _ => unreachable!(
+                                                "unknown attribute found on `xf` element"
+                                            ),
                                         }
                                     }
 
@@ -493,7 +496,7 @@ pub(super) fn styles(archive: &mut ZipArchive<BufReader<File>>) -> Result<Styles
                         buf_2.clear();
                         if let Ok(event) = reader.read_event_into(&mut buf_2) {
                             match event {
-                                Event::Start(start)
+                                Event::Empty(start)
                                     if start.local_name().as_ref() == b"rgbColor" =>
                                 {
                                     //   <rgbColor rgb="FF000000" />
@@ -708,10 +711,6 @@ pub(super) fn _relationships(_archive: &mut ZipArchive<BufReader<File>>) -> Vec<
     todo!()
 }
 
-pub(super) fn _workbook(_archive: &mut ZipArchive<BufReader<File>>) -> Vec<CompactString> {
-    todo!()
-}
-
 pub(super) fn _worksheet_nothing<'a>(
     worksheet: &mut Worksheet<'a>,
     archive: &mut ZipArchive<BufReader<File>>,
@@ -726,11 +725,7 @@ pub(super) fn _worksheet_nothing<'a>(
 
     let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader
-        .check_end_names(false)
-        .trim_text(false)
-        .check_comments(false)
-        .expand_empty_elements(true);
+    reader.check_end_names(false);
 
     let mut buffer: Vec<u8> = Vec::with_capacity(1024);
 
@@ -754,11 +749,10 @@ pub(super) fn worksheet<'a>(
     shared_strings: &'a [CompactString],
     styles: &'a Styles,
 ) -> Result<Option<()>, Error> {
-    let file = match archive.by_name(&format!(
-        "xl/worksheets/{}.xml",
-        // NOTE: files are stored with lowercase names?
-        worksheet.name.to_lowercase()
-    )) {
+    // INFO: All sheet file names are in the form of `sheet` and then the `sheetId`.
+    // Before this function is called, the worksheet is filtered to the matching `name`
+    // and then the id is used to get the sheet xml file handle.
+    let file = match archive.by_name(&format!("xl/worksheets/sheet{}.xml", worksheet.id)) {
         Ok(ok) => ok,
         Err(ZipError::FileNotFound) => return Ok(None),
         Err(err) => return Err(err.into()),
@@ -766,11 +760,7 @@ pub(super) fn worksheet<'a>(
 
     let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader
-        .check_end_names(false)
-        .trim_text(false)
-        .check_comments(false)
-        .expand_empty_elements(true);
+    reader.check_end_names(false);
 
     let mut buf_1: Vec<u8> = Vec::with_capacity(1024);
     let mut buf_2: Vec<u8> = Vec::with_capacity(1024);
@@ -779,9 +769,9 @@ pub(super) fn worksheet<'a>(
     let mut dimensions_are_known = false;
 
     loop {
-        if let Ok(event) = reader.read_event_into(&mut buf_1) {
+        if let Ok(event) = &reader.read_event_into(&mut buf_1) {
             match event {
-                Event::Start(ref start) if start.local_name().as_ref() == b"dimension" => {
+                Event::Empty(start) if start.local_name().as_ref() == b"dimension" => {
                     if let Some(Ok(Attribute {
                         key: QName(b"ref"),
                         value: dimensions,
@@ -923,6 +913,7 @@ pub(super) fn worksheet<'a>(
 /// # Safety
 ///
 /// Must only pass in valid ascii `A-Z` columns and `0-9` rows.
+#[inline(always)]
 unsafe fn excel_column_row_to_tuple_unchecked(pos: &[u8]) -> (u32, u32) {
     let mut idx = 0;
 
@@ -946,6 +937,7 @@ unsafe fn excel_column_row_to_tuple_unchecked(pos: &[u8]) -> (u32, u32) {
 /// # Panics
 ///
 /// Will panic if the provided string contains a letter other than `A-Z`.
+#[inline(always)]
 unsafe fn excel_column_to_number_unchecked(column: &[u8]) -> u32 {
     let mut result = 0;
     let mut multiplier = 1;
