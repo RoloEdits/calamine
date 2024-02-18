@@ -23,6 +23,7 @@ pub enum Workbook<'a> {
 }
 
 impl<'a> Workbook<'a> {
+    #[inline]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let workbook = match path
             .as_ref()
@@ -47,6 +48,7 @@ impl<'a> Workbook<'a> {
         }
     }
 
+    #[inline]
     pub fn worksheet(
         &'a mut self,
         worksheet: impl AsRef<str>,
@@ -120,11 +122,13 @@ trait WorkbookImpl<'a> {
 //           `Worksheet::rows(&mut Vec<Cell>)`
 #[derive(Debug)]
 pub struct Worksheet<'a> {
+    id: u32,
     name: CompactString,
     spreadsheet: Spreadsheet<'a>,
 }
 
 impl<'a> Worksheet<'a> {
+    #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -133,6 +137,7 @@ impl<'a> Worksheet<'a> {
     //     todo!()
     // }
 
+    #[inline]
     pub fn rows(&self) -> Rows<'_> {
         Rows {
             spreadsheet: &self.spreadsheet,
@@ -149,7 +154,6 @@ impl<'a> Worksheet<'a> {
     // }
 
     #[inline]
-    #[must_use]
     pub fn column(&self, column: u32) -> Column<'_> {
         Column {
             spreadsheet: &self.spreadsheet,
@@ -172,7 +176,6 @@ impl<'a> Worksheet<'a> {
     }
 
     #[inline]
-    #[must_use]
     pub fn size(&self) -> (u32, u32) {
         self.spreadsheet.size()
     }

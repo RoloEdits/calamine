@@ -22,6 +22,7 @@ pub(crate) struct Spreadsheet<'a> {
 }
 
 impl<'a> Spreadsheet<'a> {
+    #[inline]
     pub fn new() -> Self {
         Self {
             cells: Vec::new(),
@@ -32,6 +33,7 @@ impl<'a> Spreadsheet<'a> {
         }
     }
 
+    #[inline]
     pub fn with_size(columns: u32, rows: u32) -> Self {
         let mut cells = Vec::with_capacity((columns * rows) as usize);
 
@@ -54,6 +56,7 @@ impl<'a> Spreadsheet<'a> {
     // TODO: As this might be used after its fill, should truncate off old cells but fill in ones that fit in the new dimensions.
     //     Currently deletes all cells and starts with a clean slate.
     // NOTE: Currently the min cell position, 0, 0 (A1), is always the considered the min.
+    #[inline]
     pub fn resize(&mut self, _: (u32, u32), (max_col, max_row): (u32, u32)) {
         // incoming cell position is zero based, but the rows and columns count is 1 based.
         self.columns = max_col + 1;
@@ -83,7 +86,7 @@ impl<'a> Spreadsheet<'a> {
     // WARN: Off-by-one hell.
     // Cells use a zero based position, but the columns and rows count is 1 based.
     // 0 columns and 0 rows indicate no cells in the spreadsheet and is therefore used in the `new` implementation.
-    #[inline]
+    #[inline(always)]
     pub fn insert(&mut self, cell: Cell<'a>) {
         self.columns = self.columns.max(cell.column + 1);
         self.rows = self.rows.max(cell.row + 1);
@@ -160,6 +163,7 @@ impl<'a> Spreadsheet<'a> {
     /// # Panics
     ///
     /// When inserted cells' position is out of bounds of the current spreadsheet dimensions
+    #[inline(always)]
     pub fn insert_exact(&mut self, cell: Cell<'a>) {
         let idx = (cell.row * self.buffer_columns + cell.column) as usize;
         self.cells[idx] = cell;

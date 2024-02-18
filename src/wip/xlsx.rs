@@ -77,13 +77,14 @@ impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
     type Workbook = Xlsx<'a>;
     type Error = Error;
 
+    #[inline]
     fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self::Workbook, Self::Error> {
         let file = BufReader::new(File::open(path)?);
         let mut archive = ZipArchive::new(file)?;
 
+        let worksheets = parse::workbook(&mut archive)?;
         let styles = parse::styles(&mut archive)?;
         let shared_strings = parse::shared_strings(&mut archive)?;
-        let worksheets = parse::workbook(&mut archive)?;
 
         Ok(Xlsx {
             archive,
@@ -95,6 +96,7 @@ impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
         })
     }
 
+    #[inline]
     fn worksheet(
         &'a mut self,
         name: impl AsRef<str>,
