@@ -56,8 +56,8 @@ pub(super) fn workbook<'a>(
                     id,
                     name,
                     spreadsheet,
+                    reader: None,
                 };
-
                 worksheets.push(worksheet);
             }
             Event::End(end) if end.local_name().as_ref() == b"sheets" => break,
@@ -711,36 +711,6 @@ pub(super) fn _relationships(_archive: &mut ZipArchive<BufReader<File>>) -> Vec<
     todo!()
 }
 
-pub(super) fn _worksheet_nothing<'a>(
-    worksheet: &mut Worksheet<'a>,
-    archive: &mut ZipArchive<BufReader<File>>,
-    _shared_strings: &'a [CompactString],
-    _styles: &'a Styles,
-) -> Result<Option<()>, Error> {
-    let file = match archive.by_name(&format!("xl/worksheets/{}.xml", worksheet.name)) {
-        Ok(ok) => ok,
-        Err(ZipError::FileNotFound) => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-
-    let mut reader = Reader::from_reader(BufReader::new(file));
-
-    reader.check_end_names(false);
-
-    let mut buffer: Vec<u8> = Vec::with_capacity(1024);
-
-    loop {
-        if let Ok(event) = reader.read_event_into(&mut buffer) {
-            match event {
-                Event::Eof => break,
-                _ => continue,
-            }
-        }
-    }
-
-    Ok(Some(()))
-}
-
 #[inline]
 #[allow(clippy::too_many_lines)]
 pub(super) fn worksheet<'a>(
@@ -749,9 +719,6 @@ pub(super) fn worksheet<'a>(
     shared_strings: &'a [CompactString],
     styles: &'a Styles,
 ) -> Result<Option<()>, Error> {
-    // INFO: All sheet file names are in the form of `sheet` and then the `sheetId`.
-    // Before this function is called, the worksheet is filtered to the matching `name`
-    // and then the id is used to get the sheet xml file handle.
     let file = match archive.by_name(&format!("xl/worksheets/sheet{}.xml", worksheet.id)) {
         Ok(ok) => ok,
         Err(ZipError::FileNotFound) => return Ok(None),
