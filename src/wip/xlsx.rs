@@ -2,13 +2,14 @@ mod error;
 mod parse;
 
 use compact_str::CompactString;
+use quick_xml::Reader;
 use std::{fs::File, io::BufReader};
-use zip::ZipArchive;
+use zip::{result::ZipError, ZipArchive};
 
 pub use self::error::Error;
 use self::parse::Styles;
 
-use super::{Spreadsheet, WorkbookImpl, Worksheet};
+use super::{spreadsheet::Rows, Workbook, Worksheet};
 
 const MAX_ROWS: u32 = 1_048_576;
 const MAX_COLUMNS: u16 = 16_384;
@@ -64,16 +65,20 @@ const MIN_DATE: i64 = -2_208_960_000;
 const MIN_1904_DATE: i64 = -2_082_816_000;
 const MAX_DATE: i64 = 253_402_329_599;
 
+mod format {
+    pub struct Xlsx;
+}
+
 pub struct Xlsx<'a> {
     archive: ZipArchive<BufReader<File>>,
-    worksheets: Vec<Worksheet<'a>>,
+    worksheets: Vec<Worksheet<'a, Self>>,
     shared_strings: Vec<CompactString>,
     theme: Vec<CompactString>,
     styles: Styles,
     relationships: Vec<CompactString>,
 }
 
-impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
+impl<'a> Workbook<'a> for Xlsx<'a> {
     type Workbook = Xlsx<'a>;
     type Error = Error;
 
@@ -97,44 +102,47 @@ impl<'a> WorkbookImpl<'a> for Xlsx<'a> {
     }
 
     #[inline]
-    fn worksheet(
-        &'a mut self,
-        name: impl AsRef<str>,
-    ) -> Result<Option<&mut Worksheet>, Self::Error> {
+    fn worksheet<'b: 'a>(&'a mut self, name: &str) -> Option<&'b mut Worksheet<Self::Workbook>> {
         for worksheet in &mut self.worksheets {
-            if worksheet.name == name.as_ref() {
-                match parse::worksheet(
-                    worksheet,
-                    &mut self.archive,
-                    &self.shared_strings,
-                    &self.styles,
-                )? {
-                    Some(()) => return Ok(Some(worksheet)),
-                    None => return Ok(None),
+            if worksheet.name == name {
+                let file = match self
+                    .archive
+                    // INFO: All sheet file names are in the form of `sheet` and then the `sheetId`.
+                    // Before this function is called, the worksheet is filtered to the matching `name`
+                    // and then the id is used to get the sheet xml file handle.
+                    .by_name(&format!("xl/worksheets/sheet{}.xml", worksheet.id))
+                {
+                    Ok(file) => file,
+                    Err(ZipError::FileNotFound) => return None,
+                    _ => panic!("error trying to get file handle for `{name}`"),
                 };
+
+                let mut reader = Reader::from_reader(BufReader::new(file));
+                reader.check_end_names(false);
+
+                worksheet.reader = Some(reader);
+
+                return Some(worksheet);
             }
         }
 
-        Ok(None)
+        None
     }
+}
 
-    fn worksheets(&'a mut self) -> &mut [Worksheet] {
-        &mut self.worksheets
-    }
+impl<'a> Worksheet<'a, Xlsx<'a>> {
+    pub fn rows(&'a mut self) -> Result<Rows<'a>, Box<dyn std::error::Error>> {
+        parse::worksheet(
+            self.reader
+                .as_mut()
+                .expect("reader is set when worksheet handle is gotten"),
+            &mut self.spreadsheet,
+            self.workbook,
+        )?;
 
-    fn add_worksheet<'w: 'a>(
-        &mut self,
-        worksheet: Worksheet<'w>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if self
-            .worksheets
-            .iter()
-            .any(|__worksheet| __worksheet.name == worksheet.name)
-        {
-            return Err("Sheet with name already exists".into());
-        }
-
-        self.worksheets.push(worksheet);
-        Ok(())
+        Ok(Rows {
+            spreadsheet: &self.spreadsheet,
+            row: 0,
+        })
     }
 }

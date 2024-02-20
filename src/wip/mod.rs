@@ -7,105 +7,67 @@ mod style;
 
 use cell::Cell;
 use compact_str::CompactString;
-use core::panic;
 use spreadsheet::Spreadsheet;
 use std::{io::BufReader, path::Path};
-use style::Font;
 use zip::read::ZipFile;
-
-use self::spreadsheet::{Column, Rows};
 
 // Here so that there is a cleaner API.
 // Rather than having the logic fall to the user of library, matching on an exstention
 // we can just do it here and allow a simple `Workbook::open()` that will take any of the supported file exstentions.
-pub enum Workbook<'a> {
-    Xlsx(Xlsx<'a>),
-}
+// pub enum Workbook<'a> {
+//     Xlsx(Xlsx<'a>),
+// }
 
-impl<'a> Workbook<'a> {
-    #[inline]
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let workbook = match path
-            .as_ref()
-            .extension()
-            .expect("file must have exstention")
-            .to_str()
-            .unwrap()
-        {
-            "xlsx" => {
-                let xslx = Xlsx::open(path)?;
-                Workbook::Xlsx(xslx)
-            }
-            unsupported => panic!("unsupported file type `{unsupported}`"),
-        };
+// impl<'a> Workbook<'a> {
+//     #[inline]
+//     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+//         let workbook = match path
+//             .as_ref()
+//             .extension()
+//             .expect("file must have extension")
+//             .to_str()
+//             .unwrap()
+//         {
+//             "xlsx" => {
+//                 let xslx = Xlsx::open(path)?;
+//                 Workbook::Xlsx(xslx)
+//             }
+//             unsupported => panic!("unsupported file type `{unsupported}`"),
+//         };
 
-        Ok(workbook)
-    }
+//         Ok(workbook)
+//     }
 
-    pub fn worksheets(&'a mut self) -> &mut [Worksheet] {
-        match self {
-            Workbook::Xlsx(xlsx) => xlsx.worksheets(),
-        }
-    }
+//     pub fn worksheets(&'a mut self) -> &mut [Worksheet] {
+//         match self {
+//             Workbook::Xlsx(xlsx) => xlsx.worksheets(),
+//         }
+//     }
 
-    #[inline]
-    pub fn worksheet(
-        &'a mut self,
-        worksheet: impl AsRef<str>,
-    ) -> Result<Option<&mut Worksheet>, Box<dyn std::error::Error>> {
-        let worksheet = match self {
-            Workbook::Xlsx(xlsx) => xlsx.worksheet(worksheet)?,
-        };
+//     /// Returns `Some` if worksheet exists in the workbook, otherwise returns `None`.
+//     #[inline]
+//     pub fn worksheet(&'a mut self, worksheet: impl AsRef<str>) -> Option<&mut Worksheet> {
+//         let worksheet = match self {
+//             Workbook::Xlsx(xlsx) => xlsx.worksheet(worksheet),
+//         };
 
-        Ok(worksheet)
-    }
+//         worksheet
+//     }
 
-    // pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-    //     match path.as_ref().extension().unwrap().to_str().unwrap() {
-    //         "xlsx" => Xlsx::new(),
-    //     }
-    // }
+// }
 
-    /// adds worksheet to worbook.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if worksheet name already exists in workbook.
-    pub fn add_worksheet<'w: 'a>(
-        &mut self,
-        worksheet: Worksheet<'w>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match self {
-            Workbook::Xlsx(xlsx) => xlsx.add_worksheet(worksheet)?,
-        }
-        Ok(())
-    }
-}
-
-trait WorkbookImpl<'a> {
+pub trait Workbook<'a> {
     type Workbook;
     type Error: std::error::Error;
 
     fn open<P: AsRef<Path>>(path: P) -> Result<Self::Workbook, Self::Error>;
 
-    fn worksheet(
+    fn worksheet<'b: 'a>(
         &'a mut self,
-        worksheet: impl AsRef<str>,
-    ) -> Result<Option<&mut Worksheet>, Self::Error>;
-
-    fn worksheets(&'a mut self) -> &mut [Worksheet];
-
-    // fn worksheets_mut(&mut self) -> &mut [Worksheet];
-
-    // fn worksheet_mut(
-    //     &mut self,
-    //     worksheet: impl AsRef<str>,
-    // ) -> Result<Option<&mut Worksheet>, Self::Error>;
-
-    fn add_worksheet<'w: 'a>(
-        &mut self,
-        worksheet: Worksheet<'w>,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+        worksheet: &str,
+    ) -> Option<&'b mut Worksheet<Self::Workbook>>
+    where
+        <Self as Workbook<'a>>::Workbook: Workbook<'a>;
 }
 
 // IDEA: When trying to implement a `rows_lazy()`, being able to reuse a buffer would be more performant.
@@ -120,55 +82,19 @@ trait WorkbookImpl<'a> {
 //           Potentially could even have different Workbook methods to create lazy versions of opening used throughout the rest of its usage.
 //           A read only variant. `WorkbookLazyImpl` for a `XlsxLazy` struct. Its `.rows()` would then need a buffer, `.rows(&mut Vec<Cell>)`.
 //           `Worksheet::rows(&mut Vec<Cell>)`
-#[derive(Debug)]
-pub struct Worksheet<'a> {
+pub struct Worksheet<'a, W: Workbook<'a>> {
     id: u32,
     name: CompactString,
+    reader: Option<Reader<BufReader<ZipFile<'a>>>>,
     spreadsheet: Spreadsheet<'a>,
+    workbook: &'a W,
 }
 
-impl<'a> Worksheet<'a> {
+impl<'a, W: Workbook<'a>> Worksheet<'a, W> {
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
-
-    // pub fn window<'a>(&self, column: u32, row: u32) -> &Window<'a> {
-    //     todo!()
-    // }
-
-    #[inline]
-    pub fn rows(&self) -> Rows<'_> {
-        Rows {
-            spreadsheet: &self.spreadsheet,
-            row: 0,
-        }
-    }
-
-    // #[inline]
-    // pub fn rows_mut(&mut self) -> RowsMut<'_> {
-    //     RowsMut {
-    //         spreadsheet: &mut self.spreadsheet,
-    //         row: 0,
-    //     }
-    // }
-
-    #[inline]
-    pub fn column(&self, column: u32) -> Column<'_> {
-        Column {
-            spreadsheet: &self.spreadsheet,
-            column,
-            row: 0,
-        }
-    }
-
-    // pub fn row(&self, row: u32) -> Row<'_> {
-    //     Row {
-    //         cells: self.spreadsheet,
-    //         columns: 0,
-    //         row,
-    //     }
-    // }
 
     #[inline]
     pub fn cells(&self) -> impl Iterator<Item = &Cell> {
@@ -186,9 +112,21 @@ impl<'a> Worksheet<'a> {
     }
 
     #[inline]
-    pub fn insert_cells(&mut self, mut cells: Vec<Cell<'a>>) {
-        for cell in cells.drain(..) {
+    pub fn insert_cell_exact(&mut self, cell: Cell<'a>) {
+        self.spreadsheet.insert_exact(cell);
+    }
+
+    #[inline]
+    pub fn insert_cells(&mut self, cells: Vec<Cell<'a>>) {
+        for cell in cells {
             self.spreadsheet.insert(cell);
+        }
+    }
+
+    #[inline]
+    pub fn insert_cells_exact(&mut self, cells: Vec<Cell<'a>>) {
+        for cell in cells {
+            self.spreadsheet.insert_exact(cell);
         }
     }
 }

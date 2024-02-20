@@ -7,12 +7,14 @@ use quick_xml::{
     Reader,
 };
 use std::{borrow::Cow, fs::File, io::BufReader};
-use zip::{result::ZipError, ZipArchive};
+use zip::{read::ZipFile, ZipArchive};
+
+use super::Xlsx;
 
 #[inline]
 pub(super) fn workbook<'a>(
     archive: &mut ZipArchive<BufReader<File>>,
-) -> Result<Vec<Worksheet<'a>>, Error> {
+) -> Result<Vec<Worksheet<'a, super::Xlsx<'a>>>, Error> {
     let file = archive.by_name("xl/workbook.xml")?;
     let mut reader = Reader::from_reader(BufReader::new(file));
 
@@ -57,6 +59,7 @@ pub(super) fn workbook<'a>(
                     name,
                     spreadsheet,
                     reader: None,
+                    workbook: todo!(),
                 };
                 worksheets.push(worksheet);
             }
@@ -714,20 +717,19 @@ pub(super) fn _relationships(_archive: &mut ZipArchive<BufReader<File>>) -> Vec<
 #[inline]
 #[allow(clippy::too_many_lines)]
 pub(super) fn worksheet<'a>(
-    worksheet: &mut Worksheet<'a>,
-    archive: &mut ZipArchive<BufReader<File>>,
-    shared_strings: &'a [CompactString],
-    styles: &'a Styles,
-) -> Result<Option<()>, Error> {
-    let file = match archive.by_name(&format!("xl/worksheets/sheet{}.xml", worksheet.id)) {
-        Ok(ok) => ok,
-        Err(ZipError::FileNotFound) => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
+    reader: &mut Reader<BufReader<ZipFile>>,
+    spreadsheet: &mut Spreadsheet<'a>,
+    workbook: &'a Xlsx,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // let file = match archive.by_name(&format!("xl/worksheets/sheet{}.xml", worksheet.id)) {
+    //     Ok(ok) => ok,
+    //     Err(ZipError::FileNotFound) => return Ok(None),
+    //     Err(err) => return Err(err.into()),
+    // };
 
-    let mut reader = Reader::from_reader(BufReader::new(file));
+    // let mut reader = Reader::from_reader(BufReader::new(file));
 
-    reader.check_end_names(false);
+    // reader.check_end_names(false);
 
     let mut buf_1: Vec<u8> = Vec::with_capacity(1024);
     let mut buf_2: Vec<u8> = Vec::with_capacity(1024);
@@ -736,145 +738,146 @@ pub(super) fn worksheet<'a>(
     let mut dimensions_are_known = false;
 
     loop {
-        if let Ok(event) = &reader.read_event_into(&mut buf_1) {
-            match event {
-                Event::Empty(start) if start.local_name().as_ref() == b"dimension" => {
-                    if let Some(Ok(Attribute {
-                        key: QName(b"ref"),
-                        value: dimensions,
-                    })) = start.attributes().next()
-                    {
-                        let mut parts = dimensions.split(|char| *char == b':');
+        buf_1.clear();
+        let event = &reader.read_event_into(&mut buf_1)?;
 
-                        let top_left =
-                            unsafe { excel_column_row_to_tuple_unchecked(parts.next().unwrap()) };
-                        let bottom_right =
-                            unsafe { excel_column_row_to_tuple_unchecked(parts.next().unwrap()) };
+        match event {
+            Event::Empty(dimension) if dimension.local_name().as_ref() == b"dimension" => {
+                if let Some(Ok(Attribute {
+                    key: QName(b"ref"),
+                    value: dimensions,
+                })) = dimension.attributes().next()
+                {
+                    let mut parts = dimensions.split(|char| *char == b':');
 
-                        worksheet.spreadsheet.resize(top_left, bottom_right);
+                    let top_left =
+                        unsafe { excel_column_row_to_tuple_unchecked(parts.next().unwrap()) };
+                    let bottom_right =
+                        unsafe { excel_column_row_to_tuple_unchecked(parts.next().unwrap()) };
 
-                        dimensions_are_known = true;
-                    }
+                    spreadsheet.resize(top_left, bottom_right);
+
+                    dimensions_are_known = true;
                 }
-                Event::Start(ref start) if start.local_name().as_ref() == b"c" => {
-                    let mut attributes = start.attributes();
-
-                    let mut cell = Cell::default();
-
-                    // Go through each attribute and take relevant data from them.
-                    // Example: <c r="A1" s="5" t="s">
-                    // If no `t` then default to number
-                    // Example:  <c r="E1" s="3">
-
-                    if let Some(Ok(Attribute {
-                        // Cell position.
-                        // Example: "A1"
-                        key: QName(b"r"),
-                        value: ref pos,
-                    })) = attributes.next()
-                    {
-                        // SAFETY: document is known valid utf8
-                        // `r="A1"` getting the `A1` part
-                        let (column, row) = unsafe { excel_column_row_to_tuple_unchecked(pos) };
-
-                        cell.column = column;
-                        cell.row = row;
-                    }
-
-                    if let Some(Ok(Attribute {
-                        // Style
-                        key: QName(b"s"),
-                        value: ref style_idx,
-                    })) = attributes.next()
-                    {
-                        let idx = unsafe {
-                            std::str::from_utf8_unchecked(style_idx)
-                                .parse::<usize>()
-                                .unwrap()
-                        };
-
-                        cell.font = Cow::Owned(styles.font(idx));
-                    }
-
-                    if let Some(Ok(Attribute {
-                        // "t" = Datatype
-                        key: QName(b"t"),
-                        value: ref typ,
-                    })) = attributes.next()
-                    {
-                        match typ.as_ref() {
-                            // shared string
-                            b"s" => {
-                                cell.r#type = Some(Type::String);
-                            }
-                            // in-line string
-                            b"is" => cell.r#type = Some(Type::String),
-                            // formula
-                            b"f" => cell.r#type = Some(Type::Formula),
-                            // number
-                            b"n" => {
-                                cell.r#type = Some(Type::Number);
-                            }
-                            unknown => panic!(
-                                "unknown attribute on cell: `{}`",
-                                std::str::from_utf8(unknown).unwrap()
-                            ),
-                        }
-                    }
-
-                    // If there is no `t` attribute, then default to `Type::Number`
-                    if cell.r#type.is_none() {
-                        cell.r#type = Some(Type::Number);
-                    }
-
-                    // Get relevant value in cell
-                    buf_2.clear();
-                    if let Ok(Event::Start(start)) = reader.read_event_into(&mut buf_2) {
-                        // Get the value of `<v>VALUE</v>` if it exists. If it doesnt, then the cell will have a vlue of `None`
-                        if start.local_name().as_ref() == b"v" {
-                            if let Ok(Event::Text(text)) = reader.read_event_into(&mut buf_3) {
-                                match cell
-                                    .r#type
-                                    .expect("must have a type if there is a value element found")
-                                {
-                                    Type::Number => {
-                                        cell.value = Some(Cow::Owned(CompactString::new(
-                                            &text.unescape().unwrap(),
-                                        )));
-                                    }
-                                    Type::String => {
-                                        let idx = unsafe {
-                                            std::str::from_utf8_unchecked(&text)
-                                                .parse::<usize>()
-                                                .unwrap()
-                                        };
-
-                                        cell.value = Some(Cow::Borrowed(&shared_strings[idx]));
-                                    }
-                                    Type::Formula => todo!(),
-                                };
-                            }
-                        }
-                    }
-
-                    if dimensions_are_known {
-                        worksheet.spreadsheet.insert_exact(cell);
-                    } else {
-                        worksheet.spreadsheet.insert(cell);
-                    }
-                }
-                Event::End(ref end) if end.local_name().as_ref() == b"sheetData" => {
-                    break;
-                }
-                Event::Eof => {
-                    break;
-                }
-                _ => continue,
             }
+            Event::Start(start) if start.local_name().as_ref() == b"c" => {
+                let mut attributes = start.attributes();
+
+                let mut cell = Cell::default();
+
+                // Go through each attribute and take relevant data from them.
+                // Example: <c r="A1" s="5" t="s">
+                // If no `t` then default to number
+                // Example:  <c r="E1" s="3">
+
+                if let Some(Ok(Attribute {
+                    // Cell position.
+                    // Example: "A1"
+                    key: QName(b"r"),
+                    value: ref pos,
+                })) = attributes.next()
+                {
+                    // SAFETY: document is known valid utf8
+                    // `r="A1"` getting the `A1` part
+                    let (column, row) = unsafe { excel_column_row_to_tuple_unchecked(pos) };
+
+                    cell.column = column;
+                    cell.row = row;
+                }
+
+                if let Some(Ok(Attribute {
+                    // Style
+                    key: QName(b"s"),
+                    value: ref style_idx,
+                })) = attributes.next()
+                {
+                    let idx = unsafe {
+                        std::str::from_utf8_unchecked(style_idx)
+                            .parse::<usize>()
+                            .unwrap()
+                    };
+
+                    cell.font = Cow::Owned(workbook.styles.font(idx));
+                }
+
+                if let Some(Ok(Attribute {
+                    // "t" = Datatype
+                    key: QName(b"t"),
+                    value: ref typ,
+                })) = attributes.next()
+                {
+                    match typ.as_ref() {
+                        // shared string
+                        b"s" => {
+                            cell.r#type = Some(Type::String);
+                        }
+                        // in-line string
+                        b"is" => cell.r#type = Some(Type::String),
+                        // formula
+                        b"f" => cell.r#type = Some(Type::Formula),
+                        // number
+                        b"n" => {
+                            cell.r#type = Some(Type::Number);
+                        }
+                        unknown => panic!(
+                            "unknown attribute on cell: `{}`",
+                            std::str::from_utf8(unknown).unwrap()
+                        ),
+                    }
+                }
+
+                // If there is no `t` attribute, then default to `Type::Number`
+                if cell.r#type.is_none() {
+                    cell.r#type = Some(Type::Number);
+                }
+
+                // Get relevant value in cell
+                buf_2.clear();
+                if let Event::Start(start) = &reader.read_event_into(&mut buf_2)? {
+                    // Get the value of `<v>VALUE</v>` if it exists. If it doesnt, then the cell will have a vlue of `None`
+                    if start.local_name().as_ref() == b"v" {
+                        if let Event::Text(text) = &reader.read_event_into(&mut buf_3)? {
+                            match cell
+                                .r#type
+                                .expect("must have a type if there is a value element found")
+                            {
+                                Type::Number => {
+                                    cell.value = Some(Cow::Owned(CompactString::new(
+                                        &text.unescape().unwrap(),
+                                    )));
+                                }
+                                Type::String => {
+                                    let idx = unsafe {
+                                        std::str::from_utf8_unchecked(&text)
+                                            .parse::<usize>()
+                                            .unwrap()
+                                    };
+
+                                    cell.value = Some(Cow::Borrowed(&workbook.shared_strings[idx]));
+                                }
+                                Type::Formula => todo!(),
+                            };
+                        }
+                    }
+                }
+
+                if dimensions_are_known {
+                    spreadsheet.insert_exact(cell);
+                } else {
+                    spreadsheet.insert(cell);
+                }
+            }
+            Event::End(end) if end.local_name().as_ref() == b"sheetData" => {
+                break;
+            }
+            Event::Eof => {
+                break;
+            }
+            _ => continue,
         }
     }
 
-    Ok(Some(()))
+    Ok(())
 }
 
 /// # Safety
